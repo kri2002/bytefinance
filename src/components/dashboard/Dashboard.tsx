@@ -1,15 +1,18 @@
 'use client'; 
 
 import { useState, useMemo, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Wallet, TrendingUp, TrendingDown, DollarSign, X, LucideIcon, PlusCircle, ArrowRight, MinusCircle } from 'lucide-react';
+import Swal from 'sweetalert2';
+
 import WeeklyChart from './WeeklyChart';
 import DailyClosingPanel from './DailyClosingPanel';
 import ExpensePanel from './ExpensePanel';
 import PaymentConfirmationModal from '../recurring/PaymentConfirmationModal';
+import { saveTransaction, saveRecurringPayment } from '@/lib/actions';
 
-// --- INTERFACES ---
 interface Transaction {
-  id: number;
+  id: string | number;
   name: string;
   day: string;
   date: string;
@@ -19,131 +22,199 @@ interface Transaction {
   source?: 'recurring' | 'manual'; 
 }
 
-// --- MOCK DATA ---
-const RECURRING_MOCK_DB = [
-    { id: 101, name: "Netflix Premium", amount: 299, nextDate: new Date().toLocaleDateString('en-CA') }, 
-    { id: 102, name: "Internet", amount: 500, nextDate: new Date(Date.now() + 86400000).toLocaleDateString('en-CA') }, 
-    { id: 103, name: "Seguro Auto", amount: 4500, nextDate: '2025-12-30' }, 
-];
+interface RecurringPayment {
+  id: string;
+  name: string;
+  amount: number;
+  nextDate: string; 
+  frequency?: string;
+}
 
-const initialTransactions: Transaction[] = [];
+interface DashboardProps {
+  initialData: Transaction[];
+  recurringConfig: RecurringPayment[];
+}
 
-export default function Dashboard() {
-  const [transactions, setTransactions] = useState<Transaction[]>(initialTransactions);
+const Toast = Swal.mixin({
+    toast: true,
+    position: 'top-end',
+    showConfirmButton: false,
+    timer: 3000,
+    timerProgressBar: true,
+    background: '#1e293b',
+    color: '#fff',
+    iconColor: '#34d399',
+    customClass: { popup: 'colored-toast' },
+    didOpen: (toast) => {
+        toast.addEventListener('mouseenter', Swal.stopTimer)
+        toast.addEventListener('mouseleave', Swal.resumeTimer)
+    }
+});
+
+export default function Dashboard({ initialData, recurringConfig }: DashboardProps) {
+  const router = useRouter();
+
+  const [transactions, setTransactions] = useState<Transaction[]>(initialData || []);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   
   const [isClosingPanelOpen, setIsClosingPanelOpen] = useState(false);
   const [isExpensePanelOpen, setIsExpensePanelOpen] = useState(false);
   const [paymentTx, setPaymentTx] = useState<Transaction | null>(null);
 
-  // --- LÓGICA: CARGAR PAGOS RECURRENTES ---
   useEffect(() => {
+    setTransactions(initialData || []);
+  }, [initialData]);
+
+  useEffect(() => {
+    if (!recurringConfig || recurringConfig.length === 0) return;
+
     const today = new Date();
     const endOfWeek = new Date(today); 
     endOfWeek.setDate(today.getDate() - today.getDay() + 7); 
     const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
-    const upcomingRecurring = RECURRING_MOCK_DB.filter(item => {
-        const itemDate = new Date(item.nextDate + 'T12:00:00');
-        return itemDate >= new Date(new Date().setHours(0,0,0,0)) && itemDate <= endOfWeek;
-    });
-
     const newTxToAdd: Transaction[] = [];
     
-    upcomingRecurring.forEach(rec => {
-        const exists = transactions.find(t => t.name === rec.name && t.type === 'expense');
-        
-        if (!exists) {
-            const d = new Date(rec.nextDate + 'T12:00:00');
-            const dayName = dayNames[d.getDay()];
-            const dateStr = d.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric' });
+    recurringConfig.forEach(rec => {
+        const dueDate = new Date(rec.nextDate + 'T12:00:00');
+        const todayStart = new Date(new Date().setHours(0,0,0,0));
 
-            newTxToAdd.push({
-                id: Date.now() + Math.random(),
-                name: rec.name,
-                day: dayName,
-                date: `Vence: ${dateStr}`,
-                amount: -Math.abs(rec.amount),
-                type: 'expense',
-                status: 'pending',
-                source: 'recurring'
-            });
+        const isDueThisWeek = dueDate >= todayStart && dueDate <= endOfWeek;
+
+        if (isDueThisWeek) {
+            const alreadyPaid = transactions.find(t => 
+                t.name === rec.name && 
+                t.type === 'expense' &&
+                (t.status === 'paid' || t.status === 'pending') &&
+                t.source !== 'recurring' 
+            );
+            
+            if (!alreadyPaid) {
+                const dayName = dayNames[dueDate.getDay()];
+                const dateStr = dueDate.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric' });
+
+                newTxToAdd.push({
+                    id: `pending-${rec.id}`,
+                    name: rec.name,
+                    day: dayName,
+                    date: `Vence: ${dateStr}`,
+                    amount: -Math.abs(rec.amount),
+                    type: 'expense',
+                    status: 'pending',
+                    source: 'recurring'
+                });
+            }
         }
     });
 
     if (newTxToAdd.length > 0) {
-        setTransactions(prev => [...prev, ...newTxToAdd]);
+        setTransactions(prev => {
+            const cleanPrev = prev.filter(p => !p.id.toString().startsWith('pending-'));
+            return [...cleanPrev, ...newTxToAdd];
+        });
     }
-  }, []); 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialData, recurringConfig]); 
 
   // --- HANDLERS ---
 
-  const handleSaveClosing = (values: { didi: string; uber: string; cash: string; date: string }) => {
-    const transactionDate = new Date(values.date + 'T12:00:00'); 
-    const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-    const currentDayName = dayNames[transactionDate.getDay()];
-    const dateString = transactionDate.toLocaleDateString('es-MX', { weekday: 'long', hour: '2-digit', minute: '2-digit' });
+  const handleSaveClosing = async (values: { didi: string; uber: string; cash: string; date: string }) => {
+    const dateString = values.date;
+    const promises = [];
 
-    const newTransactions: Transaction[] = [];
-    const maxId = transactions.length > 0 ? Math.max(...transactions.map(t => t.id)) : 0;
-    let nextId = maxId + 1;
+    if (Number(values.didi) !== 0) promises.push(saveTransaction({ name: "Didi Card (Ingreso)", amount: Number(values.didi), type: 'income', date: dateString, status: 'received' }));
+    if (Number(values.uber) !== 0) promises.push(saveTransaction({ name: "Uber Card (Ingreso)", amount: Number(values.uber), type: 'income', date: dateString, status: 'received' }));
+    if (Number(values.cash) !== 0) promises.push(saveTransaction({ name: "Efectivo (Mano)", amount: Number(values.cash), type: 'income', date: dateString, status: 'received' }));
 
-    // CORRECCIÓN 1: Cambiamos '> 0' por '!== 0' para permitir negativos (ajustes)
-    const didiVal = Number(values.didi);
-    if (didiVal !== 0) newTransactions.push({id: nextId++, name: "Didi Card", day: currentDayName, date: dateString, amount: didiVal, type: 'income', status: 'received', source: 'manual'});
-    
-    const uberVal = Number(values.uber);
-    if (uberVal !== 0) newTransactions.push({id: nextId++, name: "Uber Card", day: currentDayName, date: dateString, amount: uberVal, type: 'income', status: 'received', source: 'manual'});
-    
-    const cashVal = Number(values.cash);
-    if (cashVal !== 0) newTransactions.push({id: nextId++, name: "Efectivo", day: currentDayName, date: dateString, amount: cashVal, type: 'income', status: 'received', source: 'manual'});
-
-    setTransactions(prev => [...prev, ...newTransactions]);
+    await Promise.all(promises);
     setIsClosingPanelOpen(false);
+    Toast.fire({ icon: 'success', title: 'Cierre guardado' });
+    router.refresh(); 
   };
 
-  const handleSaveExpense = (values: { name: string; amount: string; date: string; status: 'paid' | 'pending' }) => {
-    const transactionDate = new Date(values.date + 'T12:00:00');
-    const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-    const currentDayName = dayNames[transactionDate.getDay()];
-    const dateString = transactionDate.toLocaleDateString('es-MX', { weekday: 'long', hour: '2-digit', minute: '2-digit' });
-    const maxId = transactions.length > 0 ? Math.max(...transactions.map(t => t.id)) : 0;
-    
-    const newExpense: Transaction = {
-      id: maxId + 1,
-      name: values.name,
-      day: currentDayName,
-      date: dateString,
-      amount: -Math.abs(Number(values.amount)),
-      type: 'expense',
-      status: values.status,
-      source: 'manual'
-    };
-
-    setTransactions(prev => [...prev, newExpense]);
+  const handleSaveExpense = async (values: { name: string; amount: string; date: string; status: 'paid' | 'pending' }) => {
+    await saveTransaction({
+        name: values.name,
+        amount: -Math.abs(Number(values.amount)),
+        type: 'expense',
+        date: values.date,
+        status: values.status
+    });
     setIsExpensePanelOpen(false);
+    Toast.fire({ icon: 'success', title: 'Gasto registrado' });
+    router.refresh();
   };
 
-  const handleConfirmPayment = (method: 'cash' | 'card') => {
+  const handleConfirmPayment = async (method: 'cash' | 'card') => {
     if (!paymentTx) return;
-    setTransactions(prev => prev.map(t => 
-        t.id === paymentTx.id 
-        ? { ...t, status: 'paid' } 
-        : t
-    ));
+    
+    if (paymentTx.id.toString().startsWith('pending-')) {
+        const todayISO = new Date().toISOString().split('T')[0];
+        
+        await saveTransaction({
+            name: paymentTx.name,
+            amount: paymentTx.amount, 
+            type: 'expense',
+            date: todayISO,
+            status: 'paid',
+            method: method === 'card' ? 'Tarjeta' : 'Efectivo'
+        });
+
+        const originalRecurringId = paymentTx.id.toString().replace('pending-', '');
+        const config = recurringConfig.find(r => r.id === originalRecurringId);
+        
+        if (config) {
+            const current = new Date(config.nextDate + 'T12:00:00');
+            const next = new Date(current);
+            const freq = config.frequency || 'monthly'; 
+            if (freq === 'weekly') next.setDate(current.getDate() + 7);
+            if (freq === 'biweekly') next.setDate(current.getDate() + 15);
+            if (freq === 'monthly') next.setMonth(current.getMonth() + 1);
+            if (freq === 'yearly') next.setFullYear(current.getFullYear() + 1);
+            
+            await saveRecurringPayment({
+                id: config.id,
+                name: config.name,
+                amount: config.amount,
+                frequency: freq,
+                nextDate: next.toLocaleDateString('en-CA')
+            });
+        }
+    } 
+    else {
+        await saveTransaction({
+            id: paymentTx.id.toString(),
+            name: paymentTx.name,
+            amount: paymentTx.amount, 
+            type: 'expense',
+            date: paymentTx.date,
+            status: 'paid',
+            method: method === 'card' ? 'Tarjeta' : 'Efectivo'
+        });
+    }
+
     setPaymentTx(null);
+    Toast.fire({ icon: 'success', title: 'Pago registrado' });
+    router.refresh();
   };
 
-  // --- CÁLCULOS Y MÉTRICAS ---
   const chartData = useMemo(() => {
     const days = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
     const dataMap = days.map(day => ({ name: day, income: 0, expense: 0 }));
 
     transactions.forEach(t => {
-      const dayIndex = days.indexOf(t.day);
-      if (dayIndex !== -1) {
+      let dayIndex = -1;
+      if (t.date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          const d = new Date(t.date + 'T12:00:00'); 
+          const jsDay = d.getDay(); 
+          dayIndex = jsDay === 0 ? 6 : jsDay - 1;
+      } else {
+          const normalizedDay = t.day.charAt(0).toUpperCase() + t.day.slice(1).toLowerCase();
+          dayIndex = days.indexOf(normalizedDay);
+      }
+      if (dayIndex >= 0 && dayIndex < 7) {
         if (t.type === 'income') dataMap[dayIndex].income += t.amount;
-        else if (t.status === 'paid') dataMap[dayIndex].expense += Math.abs(t.amount); 
+        else if (t.status === 'paid' || t.status === 'received') dataMap[dayIndex].expense += Math.abs(t.amount); 
       }
     });
     return dataMap;
@@ -158,7 +229,8 @@ export default function Dashboard() {
     
     filteredTransactions.forEach(t => {
       if (t.type === 'income') {
-          income += t.amount;
+          if (t.amount > 0) income += t.amount;
+          else expense += Math.abs(t.amount); 
           if(t.status === 'received') balance += t.amount;
       } else {
         if (t.status === 'pending') {
@@ -255,20 +327,12 @@ export default function Dashboard() {
   );
 }
 
-// --- SUBCOMPONENTES ---
-
 interface CardProps { title: string; amount: string; icon: LucideIcon; highlight?: boolean; }
 function Card({ title, amount, icon: Icon, highlight }: CardProps) {
   return (
-    <div className={`p-6 rounded-xl border transition-all duration-300 ${
-        highlight 
-        ? 'bg-amber-950/20 border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.05)]' 
-        : 'bg-slate-900 border-slate-800 hover:border-slate-700'
-    }`}>
+    <div className={`p-6 rounded-xl border transition-all duration-300 ${highlight ? 'bg-amber-950/20 border-amber-500/30' : 'bg-slate-900 border-slate-800 hover:border-slate-700'}`}>
       <div className="flex justify-between items-start mb-4">
-        <div className={`p-2 rounded-lg border ${
-            highlight ? 'bg-amber-900/20 border-amber-500/30 text-amber-500' : 'bg-slate-800 border-slate-700 text-slate-300'
-        }`}>
+        <div className={`p-2 rounded-lg border ${highlight ? 'bg-amber-900/20 border-amber-500/30 text-amber-500' : 'bg-slate-800 border-slate-700 text-slate-300'}`}>
             <Icon size={20} />
         </div>
       </div>
@@ -278,58 +342,30 @@ function Card({ title, amount, icon: Icon, highlight }: CardProps) {
   );
 }
 
-interface TransactionItemProps extends Transaction {
-    onDoubleClick?: () => void;
-}
-
+interface TransactionItemProps extends Transaction { onDoubleClick?: () => void; }
 function TransactionItem({ name, date, amount, type, status, source, onDoubleClick }: TransactionItemProps) {
   const isIncome = type === 'income';
   const isPending = status === 'pending';
   const isRecurring = source === 'recurring';
-  
-  // CORRECCIÓN 2: Lógica de formato. Si es positivo (ingreso), lleva +. Si es negativo (gasto O ajuste), lleva -.
-  // Si el monto es mayor a 0 Y es ingreso, ponemos +. Si no, ponemos - y el valor absoluto.
   const displayAmount = (isIncome && amount > 0) ? `+$${amount}` : `-$${Math.abs(amount)}`;
   
-  let bgClass = ''; let borderClass = ''; let textAmountClass = ''; let iconBg = ''; let iconText = '';
-
-  if (isIncome) {
-    bgClass = 'bg-emerald-500/5 hover:bg-emerald-500/10'; borderClass = 'border-emerald-500/10'; textAmountClass = 'text-emerald-400'; iconBg = 'bg-emerald-500/20'; iconText = 'text-emerald-400';
-  } else if (isPending) {
-    bgClass = 'bg-amber-500/5 hover:bg-amber-500/10 cursor-pointer'; 
-    borderClass = 'border-amber-500/10'; textAmountClass = 'text-amber-400'; iconBg = 'bg-amber-500/20'; iconText = 'text-amber-400';
-  } else {
-    bgClass = 'bg-blue-500/5 hover:bg-blue-500/10'; borderClass = 'border-blue-500/10'; textAmountClass = 'text-blue-400'; iconBg = 'bg-blue-500/20'; iconText = 'text-blue-400';
-  }
+  let bgClass = '', borderClass = '', textAmountClass = '', iconBg = '', iconText = '';
+  if (isIncome) { bgClass = 'bg-emerald-500/5 hover:bg-emerald-500/10'; borderClass = 'border-emerald-500/10'; textAmountClass = 'text-emerald-400'; iconBg = 'bg-emerald-500/20'; iconText = 'text-emerald-400'; }
+  else if (isPending) { bgClass = 'bg-amber-500/5 hover:bg-amber-500/10 cursor-pointer'; borderClass = 'border-amber-500/10'; textAmountClass = 'text-amber-400'; iconBg = 'bg-amber-500/20'; iconText = 'text-amber-400'; }
+  else { bgClass = 'bg-blue-500/5 hover:bg-blue-500/10'; borderClass = 'border-blue-500/10'; textAmountClass = 'text-blue-400'; iconBg = 'bg-blue-500/20'; iconText = 'text-blue-400'; }
 
   return (
-    <div 
-        onDoubleClick={onDoubleClick}
-        className={`flex justify-between items-center py-3 px-4 rounded-xl border transition-all duration-300 ${bgClass} ${borderClass} relative overflow-hidden select-none`}
-        title={isPending ? "Doble clic para pagar" : ""}
-    >
-      
-      {isRecurring && isPending && (
-         <div className="absolute left-0 top-0 bottom-0 w-1 bg-amber-500/50"></div>
-      )}
-
+    <div onDoubleClick={onDoubleClick} className={`flex justify-between items-center py-3 px-4 rounded-xl border transition-all duration-300 ${bgClass} ${borderClass} relative overflow-hidden select-none`} title={isPending ? "Doble clic para pagar" : ""}>
+      {isRecurring && isPending && <div className="absolute left-0 top-0 bottom-0 w-1 bg-amber-500/50"></div>}
       <div className="flex items-center gap-3">
-        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${iconBg} ${iconText}`}>
-          {name.charAt(0)}
-        </div>
-        
+        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${iconBg} ${iconText}`}>{name.charAt(0)}</div>
         <div>
           <p className="font-medium text-sm text-slate-200">{name}</p>
-          <div className="flex items-center gap-2">
-             <p className="text-xs text-slate-500">{date}</p>
-          </div>
+          <div className="flex items-center gap-2"><p className="text-xs text-slate-500">{date}</p></div>
         </div>
       </div>
-      
       <div className="text-right">
-        <span className={`font-bold text-sm block ${textAmountClass}`}>
-            {displayAmount}
-        </span>
+        <span className={`font-bold text-sm block ${textAmountClass}`}>{displayAmount}</span>
         {isPending && <span className="text-[10px] text-amber-500 font-medium">Por Pagar</span>}
       </div>
     </div>

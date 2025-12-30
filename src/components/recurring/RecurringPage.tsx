@@ -1,12 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { RefreshCcw, Plus, Trash2, CheckCircle2, AlertCircle, Edit, Clock } from 'lucide-react';
+import Swal from 'sweetalert2';
 import RecurringFormModal from './RecurringFormModal';
 import PaymentConfirmationModal from './PaymentConfirmationModal';
+import { saveRecurringPayment, deleteRecurringPayment, saveTransaction } from '@/lib/actions';
 
 interface RecurringItem {
-  id: number;
+  id: string;
   name: string;
   amount: number;
   frequency: 'weekly' | 'biweekly' | 'monthly' | 'yearly';
@@ -14,29 +17,127 @@ interface RecurringItem {
 }
 
 interface RecurringPageProps {
-  // Actualizamos la firma para aceptar el método
-  onProcessPayment: (item: { name: string; amount: number; date: string; method: 'cash' | 'card' }) => void;
+  initialData: RecurringItem[];
 }
 
-export default function RecurringPage({ onProcessPayment }: RecurringPageProps) {
+export default function RecurringPage({ initialData }: RecurringPageProps) {
+  const router = useRouter();
   const getTodayString = () => new Date().toLocaleDateString('en-CA');
 
-  const [items, setItems] = useState<RecurringItem[]>([
-    { id: 1, name: "Netflix Premium", amount: 299, frequency: 'monthly', nextDate: getTodayString() }, 
-    { id: 2, name: "Spotify Duo", amount: 169, frequency: 'monthly', nextDate: '2025-12-15' },
-    { id: 3, name: "Préstamo Auto", amount: 4500, frequency: 'monthly', nextDate: '2025-12-28' },
-    { id: 4, name: "Internet", amount: 500, frequency: 'monthly', nextDate: '2026-01-05' },
-  ]);
+  const [items, setItems] = useState<RecurringItem[]>(initialData || []);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  
-  // NUEVO ESTADO: El ítem que estamos a punto de pagar
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [paymentItem, setPaymentItem] = useState<RecurringItem | null>(null);
+
+  useEffect(() => {
+    // eslint-disable-next-line
+    setItems(initialData || []);
+  }, [initialData]);
 
   const sortedItems = [...items].sort((a, b) => new Date(a.nextDate).getTime() - new Date(b.nextDate).getTime());
   const itemToEdit = editingId ? items.find(i => i.id === editingId) : null;
 
+  const handleOpenNew = () => { setEditingId(null); setIsModalOpen(true); };
+  const handleOpenEdit = (id: string) => { setEditingId(id); setIsModalOpen(true); };
+  const handleCloseModal = () => { setIsModalOpen(false); setEditingId(null); };
+
+  const handleSaveItem = async (formData: { name: string; amount: string; frequency: string; nextDate: string }) => {
+    const tempId = editingId || crypto.randomUUID(); 
+    
+    const newItem = {
+        id: tempId,
+        name: formData.name,
+        amount: Number(formData.amount),
+        frequency: formData.frequency as RecurringItem['frequency'],
+        nextDate: formData.nextDate
+    };
+
+    if (editingId) {
+        setItems(prev => prev.map(i => i.id === editingId ? newItem : i));
+    } else {
+        setItems(prev => [...prev, newItem]);
+    }
+    handleCloseModal();
+
+    const result = await saveRecurringPayment({
+        id: editingId || undefined,
+        name: formData.name,
+        amount: Number(formData.amount),
+        frequency: formData.frequency,
+        nextDate: formData.nextDate
+    });
+
+    if (result.success) {
+        Swal.fire({
+            toast: true, position: 'top-end', icon: 'success', 
+            title: editingId ? 'Actualizado' : 'Creado', 
+            showConfirmButton: false, timer: 2000, background: '#1e293b', color: '#fff'
+        });
+        router.refresh();
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    const confirm = await Swal.fire({
+        title: '¿Eliminar?', text: "Se borrará de tu configuración.",
+        icon: 'warning', showCancelButton: true,
+        confirmButtonColor: '#ef4444', cancelButtonColor: '#1e293b',
+        confirmButtonText: 'Sí, borrar', background: '#0f172a', color: '#fff'
+    });
+
+    if (confirm.isConfirmed) {
+        setItems(prev => prev.filter(i => i.id !== id)); 
+        await deleteRecurringPayment(id);
+        router.refresh();
+    }
+  };
+
+  const handleInitiatePayment = (item: RecurringItem) => setPaymentItem(item);
+
+  const handleConfirmPayment = async (method: 'cash' | 'card') => {
+    if (!paymentItem) return;
+
+    await saveTransaction({
+        name: paymentItem.name,
+        amount: -Math.abs(paymentItem.amount),
+        type: 'expense',
+        date: getTodayString(),
+        status: 'paid',
+        method: method === 'card' ? 'Tarjeta' : 'Efectivo' 
+    });
+
+    const current = new Date(paymentItem.nextDate + 'T12:00:00');
+    const next = new Date(current);
+    
+    if (paymentItem.frequency === 'weekly') next.setDate(current.getDate() + 7);
+    if (paymentItem.frequency === 'biweekly') next.setDate(current.getDate() + 15);
+    if (paymentItem.frequency === 'monthly') next.setMonth(current.getMonth() + 1);
+    if (paymentItem.frequency === 'yearly') next.setFullYear(current.getFullYear() + 1);
+
+    const nextDateStr = next.toLocaleDateString('en-CA');
+
+    await saveRecurringPayment({
+        id: paymentItem.id,
+        name: paymentItem.name,
+        amount: paymentItem.amount,
+        frequency: paymentItem.frequency,
+        nextDate: nextDateStr
+    });
+
+    setItems(prev => prev.map(i => i.id === paymentItem.id ? { ...i, nextDate: nextDateStr } : i));
+    setPaymentItem(null);
+    
+    Swal.fire({
+        toast: true, position: 'top-end', icon: 'success', 
+        title: 'Pago registrado y fecha actualizada', 
+        showConfirmButton: false, timer: 3000, background: '#1e293b', color: '#fff'
+    });
+    router.refresh();
+  };
+
+  const isDue = (dateStr: string) => new Date(dateStr) <= new Date(getTodayString());
+  
   const getDaysRemaining = (dateStr: string) => {
     const today = new Date(getTodayString()); 
     const target = new Date(dateStr);
@@ -44,55 +145,8 @@ export default function RecurringPage({ onProcessPayment }: RecurringPageProps) 
     return Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
   };
 
-  const handleOpenNew = () => { setEditingId(null); setIsModalOpen(true); };
-  const handleOpenEdit = (id: number) => { setEditingId(id); setIsModalOpen(true); };
-  const handleCloseModal = () => { setIsModalOpen(false); setEditingId(null); };
-
-  const handleSaveItem = (formData: { name: string; amount: string; frequency: string; nextDate: string }) => {
-    if (editingId) {
-        setItems(prev => prev.map(item => item.id === editingId ? { ...item, ...formData, amount: Number(formData.amount), frequency: formData.frequency as any } : item));
-    } else {
-        const newId = items.length > 0 ? Math.max(...items.map(i => i.id)) + 1 : 1;
-        setItems(prev => [...prev, { id: newId, ...formData, amount: Number(formData.amount), frequency: formData.frequency as any }]);
-    }
-    setEditingId(null);
-  };
-
-  const handleDelete = (id: number) => setItems(prev => prev.filter(i => i.id !== id));
-
-  // 1. INICIAR PROCESO (Click en botón de tabla)
-  const handleInitiatePayment = (item: RecurringItem) => {
-      setPaymentItem(item); // Esto abre el modal de confirmación
-  };
-
-  // 2. CONFIRMAR Y PROCESAR (Click en Efectivo/Tarjeta)
-  const handleConfirmPayment = (method: 'cash' | 'card') => {
-    if (!paymentItem) return;
-
-    // Enviamos al padre con el método seleccionado
-    onProcessPayment({ 
-        name: paymentItem.name, 
-        amount: paymentItem.amount, 
-        date: getTodayString(),
-        method 
-    });
-
-    // Recalcular próxima fecha
-    const current = new Date(paymentItem.nextDate + 'T12:00:00');
-    const next = new Date(current);
-    if (paymentItem.frequency === 'weekly') next.setDate(current.getDate() + 7);
-    if (paymentItem.frequency === 'biweekly') next.setDate(current.getDate() + 15);
-    if (paymentItem.frequency === 'monthly') next.setMonth(current.getMonth() + 1);
-    if (paymentItem.frequency === 'yearly') next.setFullYear(current.getFullYear() + 1);
-
-    setItems(prev => prev.map(i => i.id === paymentItem.id ? { ...i, nextDate: next.toLocaleDateString('en-CA') } : i));
-    
-    // Cerramos modal
-    setPaymentItem(null);
-  };
-
-  const isDue = (dateStr: string) => new Date(dateStr) <= new Date(getTodayString());
   const formatCurrency = (val: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(val);
+  
   const getFrequencyLabel = (freq: string) => {
     const map: Record<string, string> = { weekly: 'Semanal', biweekly: 'Quincenal', monthly: 'Mensual', yearly: 'Anual' };
     return map[freq] || freq;
@@ -101,8 +155,13 @@ export default function RecurringPage({ onProcessPayment }: RecurringPageProps) 
   return (
     <div className="space-y-8 animate-in fade-in duration-500 p-2 md:p-0">
       
-      {/* Modals */}
-      <RecurringFormModal isOpen={isModalOpen} onClose={handleCloseModal} onSave={handleSaveItem} initialData={itemToEdit} />
+      <RecurringFormModal 
+          isOpen={isModalOpen} 
+          onClose={handleCloseModal} 
+          onSave={handleSaveItem} 
+          /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+          initialData={itemToEdit as any}
+      />
       
       <PaymentConfirmationModal 
         isOpen={!!paymentItem} 
@@ -163,7 +222,6 @@ export default function RecurringPage({ onProcessPayment }: RecurringPageProps) 
                                     {formatCurrency(item.amount)}
                                 </td>
                                 <td className="p-4 flex justify-center items-center gap-2">
-                                    {/* Botón Pagar -> Abre Modal Confirmación */}
                                     <button 
                                         onClick={() => handleInitiatePayment(item)} 
                                         title={due ? "Pagar ahora" : "Adelantar pago"} 

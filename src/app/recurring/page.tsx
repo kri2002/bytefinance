@@ -1,18 +1,15 @@
-import RecurringPage from '@/components/recurring/RecurringPage';
+import RecurringPage from '@/components/recurring/RecurringPage'; 
+import { getRecurringPayments } from '@/lib/actions';
 
-interface PaymentItem {
-  name: string;
-  amount: number;
-  date: string;
-}
+export default async function Page() {
+  const recurringData = await getRecurringPayments();
 
-export default function Page() {
-  const handlePayment = async (item: PaymentItem) => {
-    'use server';
-    
-    console.log("Procesar pago:", item);
-    // Aquí conectarías con tu base de datos (DynamoDB/Postgres) en el futuro
-  };
-
-  return <RecurringPage onProcessPayment={handlePayment} />;
+  return (
+    <main className="p-4 md:p-8 min-h-screen">
+      <div className="max-w-5xl mx-auto">
+        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+        <RecurringPage initialData={recurringData as any} />
+      </div>
+    </main>
+  );
 }
