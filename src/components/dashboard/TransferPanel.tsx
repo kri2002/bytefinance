@@ -1,15 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   X,
   Save,
-  DollarSign,
+  ArrowRightLeft,
   Calendar,
-  FileText,
   Wallet,
-  AlertCircle,
-  ArrowDownCircle,
   ArrowRight,
 } from "lucide-react";
 
@@ -17,67 +14,70 @@ interface Account {
   id: string;
   name: string;
   color: string;
-  type: string;
   balance: number;
+  type: string;
 }
 
-interface WithdrawalPanelProps {
+interface TransferPanelProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (data: {
     amount: string;
     date: string;
     fromAccountId: string;
+    toAccountId: string;
+    fromName: string;
+    toName: string;
   }) => void;
   accounts: Account[];
 }
 
-export default function WithdrawalPanel({
+export default function TransferPanel({
   isOpen,
   onClose,
   onSave,
   accounts,
-}: WithdrawalPanelProps) {
+}: TransferPanelProps) {
   const getLocalToday = () => new Date().toLocaleDateString("en-CA");
 
-  // FILTRO ACTUALIZADO:
-  // 1. No efectivo (porque es el destino)
-  // 2. Que tenga saldo positivo O sea de crédito
-  const sourceAccounts = accounts.filter(
-    (a) =>
-      a.type !== "cash" &&
-      !a.name.toLowerCase().includes("efectivo") &&
-      (a.type === "credit" || a.balance > 0)
+  // FILTRO: Solo cuentas con saldo o crédito para el origen
+  const sourceAccounts = useMemo(
+    () => accounts.filter((a) => a.type === "credit" || a.balance > 0),
+    [accounts]
   );
 
   const [formData, setFormData] = useState({
     amount: "",
     date: getLocalToday(),
     fromAccountId: "",
+    toAccountId: "",
   });
 
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && sourceAccounts.length > 0) {
       setFormData({
         amount: "",
         date: getLocalToday(),
-        fromAccountId: sourceAccounts.length > 0 ? sourceAccounts[0].id : "",
+        fromAccountId: sourceAccounts[0].id,
+        toAccountId:
+          accounts.length > 1
+            ? accounts.find((a) => a.id !== sourceAccounts[0].id)?.id || ""
+            : "",
       });
       setError(null);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
+  }, [isOpen, sourceAccounts, accounts]);
 
   useEffect(() => {
-    const selectedAcc = accounts.find((a) => a.id === formData.fromAccountId);
-    const amountVal = Number(formData.amount);
+    const fromAcc = accounts.find((a) => a.id === formData.fromAccountId);
+    const val = Number(formData.amount);
 
-    if (selectedAcc && formData.amount) {
-      if (selectedAcc.type !== "credit" && amountVal > selectedAcc.balance) {
+    if (fromAcc && val > 0) {
+      if (fromAcc.type !== "credit" && val > fromAcc.balance) {
         setError(
-          `Saldo insuficiente. Tienes $${selectedAcc.balance.toLocaleString()}`
+          `Solo tienes $${fromAcc.balance.toLocaleString()} en ${fromAcc.name}`
         );
       } else {
         setError(null);
@@ -85,16 +85,31 @@ export default function WithdrawalPanel({
     } else {
       setError(null);
     }
-  }, [formData.amount, formData.fromAccountId, accounts]);
+
+    if (
+      formData.fromAccountId &&
+      formData.fromAccountId === formData.toAccountId
+    ) {
+      const other = accounts.find((a) => a.id !== formData.fromAccountId);
+      if (other) setFormData((prev) => ({ ...prev, toAccountId: other.id }));
+    }
+  }, [formData.amount, formData.fromAccountId, formData.toAccountId, accounts]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (error) return;
-    if (!formData.fromAccountId) return;
-    onSave(formData);
-  };
 
-  const selectedAccount = accounts.find((a) => a.id === formData.fromAccountId);
+    const fromAcc = accounts.find((a) => a.id === formData.fromAccountId);
+    const toAcc = accounts.find((a) => a.id === formData.toAccountId);
+
+    if (!fromAcc || !toAcc) return;
+
+    onSave({
+      ...formData,
+      fromName: fromAcc.name,
+      toName: toAcc.name,
+    });
+  };
 
   return (
     <>
@@ -115,10 +130,10 @@ export default function WithdrawalPanel({
         <div className="h-full flex flex-col">
           <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
-              <div className="bg-orange-500/20 p-2 rounded-lg">
-                <ArrowDownCircle className="text-orange-500" size={20} />
+              <div className="bg-indigo-500/20 p-2 rounded-lg">
+                <ArrowRightLeft className="text-indigo-500" size={20} />
               </div>
-              Retiro de Efectivo
+              Transferir entre Cuentas
             </h2>
             <button
               onClick={onClose}
@@ -132,20 +147,12 @@ export default function WithdrawalPanel({
             onSubmit={handleSubmit}
             className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar"
           >
-            <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl text-sm text-slate-400 flex gap-3">
-              <AlertCircle className="text-orange-500 shrink-0" size={20} />
-              <p>
-                Este movimiento se registrará como un <strong>Traspaso</strong>{" "}
-                hacia tu cuenta de <strong>Efectivo</strong>.
-              </p>
-            </div>
-
-            {/* Selector de CUENTA ORIGEN */}
+            {/* CUENTA ORIGEN (FILTRADA) */}
             <div className="space-y-3">
               <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
-                <Wallet size={16} /> Retirar de
+                <Wallet size={16} /> Desde (Origen)
               </label>
-              <div className="grid grid-cols-1 gap-3">
+              <div className="grid grid-cols-1 gap-2">
                 {sourceAccounts.map((acc) => (
                   <button
                     key={acc.id}
@@ -156,63 +163,94 @@ export default function WithdrawalPanel({
                         fromAccountId: acc.id,
                       }))
                     }
+                    disabled={acc.id === formData.toAccountId}
                     className={`flex items-center justify-between p-3 rounded-xl border transition-all text-left ${
                       formData.fromAccountId === acc.id
-                        ? "bg-slate-800 border-orange-500 shadow-md shadow-orange-900/10"
+                        ? "bg-slate-800 border-indigo-500 shadow-md shadow-indigo-900/10"
                         : "bg-slate-900 border-slate-800 hover:border-slate-600"
+                    } ${
+                      acc.id === formData.toAccountId
+                        ? "opacity-30 cursor-not-allowed"
+                        : ""
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      <div
-                        className={`w-3 h-3 rounded-full bg-gradient-to-br ${acc.color}`}
-                      ></div>
-                      <span
-                        className={`text-sm font-medium ${
-                          formData.fromAccountId === acc.id
-                            ? "text-white"
-                            : "text-slate-400"
-                        }`}
-                      >
-                        {acc.name}
-                      </span>
-                    </div>
+                    <span
+                      className={`text-sm font-medium ${
+                        formData.fromAccountId === acc.id
+                          ? "text-white"
+                          : "text-slate-400"
+                      }`}
+                    >
+                      {acc.name}
+                    </span>
+                    <span className="text-xs font-mono text-slate-500">
+                      ${acc.balance.toLocaleString()}
+                    </span>
+                  </button>
+                ))}
+                {sourceAccounts.length === 0 && (
+                  <p className="text-xs text-rose-500">
+                    No hay cuentas con fondos para transferir.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-center -my-2">
+              <div className="bg-slate-800 p-2 rounded-full text-slate-500">
+                <ArrowRight size={20} className="rotate-90 md:rotate-0" />
+              </div>
+            </div>
+
+            {/* CUENTA DESTINO (TODAS) */}
+            <div className="space-y-3">
+              <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
+                <Wallet size={16} /> Hacia (Destino)
+              </label>
+              <div className="grid grid-cols-1 gap-2">
+                {accounts.map((acc) => (
+                  <button
+                    key={acc.id}
+                    type="button"
+                    onClick={() =>
+                      setFormData((prev) => ({ ...prev, toAccountId: acc.id }))
+                    }
+                    disabled={acc.id === formData.fromAccountId}
+                    className={`flex items-center justify-between p-3 rounded-xl border transition-all text-left ${
+                      formData.toAccountId === acc.id
+                        ? "bg-slate-800 border-emerald-500 shadow-md shadow-emerald-900/10"
+                        : "bg-slate-900 border-slate-800 hover:border-slate-600"
+                    } ${
+                      acc.id === formData.fromAccountId
+                        ? "opacity-30 cursor-not-allowed"
+                        : ""
+                    }`}
+                  >
+                    <span
+                      className={`text-sm font-medium ${
+                        formData.toAccountId === acc.id
+                          ? "text-white"
+                          : "text-slate-400"
+                      }`}
+                    >
+                      {acc.name}
+                    </span>
                     <span className="text-xs font-mono text-slate-500">
                       ${acc.balance.toLocaleString()}
                     </span>
                   </button>
                 ))}
               </div>
-              {sourceAccounts.length === 0 && (
-                <p className="text-xs text-rose-500">
-                  No tienes cuentas con saldo disponible para retirar.
-                </p>
-              )}
-            </div>
-
-            <div className="flex items-center gap-4 px-4 py-3 bg-slate-900/30 rounded-xl border border-dashed border-slate-800">
-              <div className="flex flex-col">
-                <span className="text-xs text-slate-500 uppercase">
-                  Destino
-                </span>
-                <span className="font-bold text-emerald-400">
-                  Efectivo (Cartera)
-                </span>
-              </div>
-              <ArrowRight className="ml-auto text-slate-600" />
             </div>
 
             <div className="space-y-2">
               <div className="flex justify-between">
-                <label className="text-sm font-medium text-orange-400">
-                  Monto a Retirar
+                <label className="text-sm font-medium text-indigo-400">
+                  Monto
                 </label>
-                {selectedAccount && (
-                  <span
-                    className={`text-xs ${
-                      error ? "text-rose-500 font-bold" : "text-slate-500"
-                    }`}
-                  >
-                    Disponible: ${selectedAccount.balance.toLocaleString()}
+                {error && (
+                  <span className="text-xs text-rose-500 font-bold animate-pulse">
+                    {error}
                   </span>
                 )}
               </div>
@@ -227,7 +265,7 @@ export default function WithdrawalPanel({
                   className={`w-full bg-slate-900 border rounded-2xl pl-10 pr-4 py-4 text-3xl font-bold text-white placeholder:text-slate-600 outline-none transition-all ${
                     error
                       ? "border-rose-500 focus:border-rose-500"
-                      : "border-slate-700 focus:border-orange-500"
+                      : "border-slate-700 focus:border-indigo-500"
                   }`}
                   value={formData.amount}
                   onChange={(e) =>
@@ -235,11 +273,6 @@ export default function WithdrawalPanel({
                   }
                 />
               </div>
-              {error && (
-                <div className="text-xs text-rose-500 font-medium mt-1">
-                  {error}
-                </div>
-              )}
             </div>
 
             <div className="space-y-2">
@@ -266,10 +299,10 @@ export default function WithdrawalPanel({
               className={`w-full font-bold py-4 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg ${
                 error || !formData.amount
                   ? "bg-slate-800 text-slate-500 cursor-not-allowed"
-                  : "bg-orange-600 hover:bg-orange-500 text-white hover:scale-[1.02] shadow-orange-900/20"
+                  : "bg-indigo-600 hover:bg-indigo-500 text-white hover:scale-[1.02] shadow-indigo-900/20"
               }`}
             >
-              <Save size={20} /> Confirmar Retiro
+              <Save size={20} /> Realizar Transferencia
             </button>
           </div>
         </div>

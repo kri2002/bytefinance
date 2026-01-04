@@ -13,14 +13,16 @@ import {
   ArrowRight,
   MinusCircle,
   ArrowDownCircle,
-} from "lucide-react"; // 👈 Import ArrowDownCircle
+  ArrowRightLeft,
+} from "lucide-react";
 import Swal from "sweetalert2";
 
 import WeeklyChart from "./WeeklyChart";
 import DailyClosingPanel from "./DailyClosingPanel";
 import ExpensePanel from "./ExpensePanel";
 import IncomePanel from "./IncomePanel";
-import WithdrawalPanel from "./WithdrawalPanel"; // 👈 IMPORTAR
+import WithdrawalPanel from "./WithdrawalPanel";
+import TransferPanel from "./TransferPanel";
 import CategoryChart from "./CategoryChart";
 import PaymentConfirmationModal from "../recurring/PaymentConfirmationModal";
 import AccountSelectorModal from "./AccountSelectorModal";
@@ -28,6 +30,7 @@ import {
   saveTransaction,
   saveRecurringPayment,
   updateAccountBalance,
+  saveTransfer,
 } from "@/lib/actions";
 
 interface Transaction {
@@ -36,7 +39,7 @@ interface Transaction {
   day: string;
   date: string;
   amount: number;
-  type: "income" | "expense";
+  type: "income" | "expense" | "transfer";
   status: "paid" | "received" | "pending";
   source?: "recurring" | "manual";
   category?: string;
@@ -53,7 +56,7 @@ interface Account {
   color: string;
   type: string;
   balance: number;
-} // 👈 Agregué balance
+}
 interface RecurringPayment {
   id: string;
   name: string;
@@ -101,9 +104,9 @@ export default function Dashboard({
   const [isClosingPanelOpen, setIsClosingPanelOpen] = useState(false);
   const [isExpensePanelOpen, setIsExpensePanelOpen] = useState(false);
   const [isIncomePanelOpen, setIsIncomePanelOpen] = useState(false);
-  const [isWithdrawalPanelOpen, setIsWithdrawalPanelOpen] = useState(false); // 👈 NUEVO
+  const [isWithdrawalPanelOpen, setIsWithdrawalPanelOpen] = useState(false);
+  const [isTransferPanelOpen, setIsTransferPanelOpen] = useState(false);
 
-  // Estados de Pago
   const [paymentTx, setPaymentTx] = useState<Transaction | null>(null);
   const [isCardSelectorOpen, setIsCardSelectorOpen] = useState(false);
 
@@ -111,7 +114,7 @@ export default function Dashboard({
     setTransactions(initialData || []);
   }, [initialData]);
 
-  // (Lógica de Recurrentes sin cambios...)
+  // Recurrentes
   useEffect(() => {
     if (!recurringConfig || recurringConfig.length === 0) return;
     const today = new Date();
@@ -162,7 +165,6 @@ export default function Dashboard({
   }, [initialData, recurringConfig]);
 
   // --- HANDLERS ---
-
   const handleSaveClosing = async (values: {
     didi: string;
     uber: string;
@@ -218,7 +220,6 @@ export default function Dashboard({
     Toast.fire({ icon: "success", title: "Cierre guardado" });
     router.refresh();
   };
-
   const handleSaveIncome = async (values: {
     name: string;
     amount: string;
@@ -243,36 +244,6 @@ export default function Dashboard({
     Toast.fire({ icon: "success", title: "Ingreso registrado" });
     router.refresh();
   };
-
-  // NUEVO HANDLER RETIRO
-  const handleSaveWithdrawal = async (values: {
-    name: string;
-    amount: string;
-    date: string;
-    accountName: string;
-    category?: string;
-  }) => {
-    const amountVal = Math.abs(Number(values.amount));
-
-    // 1. Guardar como Gasto
-    await saveTransaction({
-      name: values.name,
-      amount: -amountVal, // Negativo
-      type: "expense",
-      date: values.date,
-      status: "paid",
-      category: values.category || "Retiro", // Categoría
-      method: values.accountName,
-    });
-
-    // 2. Restar de la cuenta
-    await updateAccountBalance(values.accountName, -amountVal);
-
-    setIsWithdrawalPanelOpen(false);
-    Toast.fire({ icon: "success", title: "Retiro registrado" });
-    router.refresh();
-  };
-
   const handleSaveExpense = async (values: {
     name: string;
     amount: string;
@@ -298,8 +269,56 @@ export default function Dashboard({
     Toast.fire({ icon: "success", title: "Gasto registrado" });
     router.refresh();
   };
+  const handleSaveTransfer = async (values: {
+    amount: string;
+    date: string;
+    fromName: string;
+    toName: string;
+  }) => {
+    await saveTransfer({
+      amount: Math.abs(Number(values.amount)),
+      date: values.date,
+      fromName: values.fromName,
+      toName: values.toName,
+    });
+    setIsTransferPanelOpen(false);
+    Toast.fire({ icon: "success", title: "Transferencia exitosa" });
+    router.refresh();
+  };
 
-  // ... (Confirmación de Pago igual...)
+  // --- NUEVO HANDLER DE RETIRO (Ahora es un TRASPASO) ---
+  const handleSaveWithdrawal = async (values: {
+    amount: string;
+    date: string;
+    fromAccountId: string;
+  }) => {
+    // 1. Encontrar nombre de cuenta origen
+    const fromAcc = accounts.find((a) => a.id === values.fromAccountId);
+    // 2. Encontrar cuenta de efectivo (destino)
+    const cashAcc = accounts.find(
+      (a) => a.type === "cash" || a.name.toLowerCase().includes("efectivo")
+    );
+
+    if (fromAcc && cashAcc) {
+      // Ejecutamos como si fuera un traspaso
+      await saveTransfer({
+        amount: Math.abs(Number(values.amount)),
+        date: values.date,
+        fromName: fromAcc.name,
+        toName: cashAcc.name,
+      });
+      Toast.fire({
+        icon: "success",
+        title: "Retiro registrado (Efectivo sumado)",
+      });
+    } else {
+      Toast.fire({ icon: "error", title: "Error: Falta cuenta de Efectivo" });
+    }
+    setIsWithdrawalPanelOpen(false);
+    router.refresh();
+  };
+
+  // ... (Confirmación de Pago y Renderizado igual que antes) ...
   const processPayment = async (accountName: string) => {
     if (!paymentTx) return;
     const todayISO = new Date().toLocaleDateString("en-CA");
@@ -369,11 +388,11 @@ export default function Dashboard({
     processPayment(account.name);
   };
 
-  // ... (Métricas y Filtros igual) ...
   const chartData = useMemo(() => {
     const days = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
     const dataMap = days.map((day) => ({ name: day, income: 0, expense: 0 }));
     transactions.forEach((t) => {
+      if (t.type === "transfer") return;
       let dayIndex = -1;
       if (t.date.match(/^\d{4}-\d{2}-\d{2}$/)) {
         const d = new Date(t.date + "T12:00:00");
@@ -385,9 +404,11 @@ export default function Dashboard({
         dayIndex = days.indexOf(normalizedDay);
       }
       if (dayIndex >= 0 && dayIndex < 7) {
-        if (t.type === "income") dataMap[dayIndex].income += t.amount;
-        else if (t.status === "paid" || t.status === "received")
+        if (t.type === "income") {
+          dataMap[dayIndex].income += t.amount;
+        } else if (t.status === "paid" || t.status === "received") {
           dataMap[dayIndex].expense += Math.abs(t.amount);
+        }
       }
     });
     return dataMap;
@@ -403,6 +424,7 @@ export default function Dashboard({
     let payable = 0;
     let balance = 0;
     filteredTransactions.forEach((t) => {
+      if (t.type === "transfer") return;
       if (t.type === "income") {
         if (t.amount > 0) income += t.amount;
         else expense += Math.abs(t.amount);
@@ -449,15 +471,20 @@ export default function Dashboard({
         accounts={accounts}
       />
 
-      {/* 5. NUEVO PANEL DE RETIRO */}
+      {/* PANEL RETIRO (Actualizado props) */}
       <WithdrawalPanel
         isOpen={isWithdrawalPanelOpen}
         onClose={() => setIsWithdrawalPanelOpen(false)}
         onSave={handleSaveWithdrawal}
         accounts={accounts}
-        categories={categories}
       />
 
+      <TransferPanel
+        isOpen={isTransferPanelOpen}
+        onClose={() => setIsTransferPanelOpen(false)}
+        onSave={handleSaveTransfer}
+        accounts={accounts}
+      />
       <PaymentConfirmationModal
         isOpen={!!paymentTx && !isCardSelectorOpen}
         onClose={() => setPaymentTx(null)}
@@ -482,8 +509,6 @@ export default function Dashboard({
               : "Tu actividad financiera de esta semana."}
           </p>
         </div>
-
-        {/* BOTONES */}
         <div className="flex flex-wrap gap-3">
           <button
             onClick={() => setIsExpensePanelOpen(true)}
@@ -497,12 +522,17 @@ export default function Dashboard({
           >
             <PlusCircle size={20} /> Ingreso
           </button>
-          {/* NUEVO BOTÓN RETIRO */}
           <button
             onClick={() => setIsWithdrawalPanelOpen(true)}
             className="bg-slate-800 hover:bg-slate-700 text-orange-400 border border-slate-700 hover:border-orange-500/50 px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all active:scale-95"
           >
             <ArrowDownCircle size={20} /> Retiro
+          </button>
+          <button
+            onClick={() => setIsTransferPanelOpen(true)}
+            className="bg-slate-800 hover:bg-slate-700 text-indigo-400 border border-slate-700 hover:border-indigo-500/50 px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all active:scale-95"
+          >
+            <ArrowRightLeft size={20} /> Traspaso
           </button>
           <button
             onClick={() => setIsClosingPanelOpen(true)}
@@ -513,7 +543,6 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* ... Cards, Gráficos ... */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card
           title="Balance (Real)"
@@ -611,7 +640,7 @@ export default function Dashboard({
   );
 }
 
-// Subcomponentes igual...
+// Subcomponentes igual
 interface CardProps {
   title: string;
   amount: string;
@@ -671,8 +700,24 @@ function TransactionItem({
   onDoubleClick,
 }: TransactionItemProps) {
   const isIncome = type === "income";
-  const displayAmount =
-    isIncome && amount > 0 ? `+$${amount}` : `-$${Math.abs(amount)}`;
+  const isTransfer = type === "transfer";
+  const displayAmount = isTransfer
+    ? `$${Math.abs(amount)}`
+    : isIncome && amount > 0
+    ? `+$${amount}`
+    : `-$${Math.abs(amount)}`;
+  let bgClass = "",
+    textClass = "";
+  if (isTransfer) {
+    bgClass = "bg-indigo-500/20 text-indigo-400";
+    textClass = "text-indigo-400";
+  } else if (isIncome) {
+    bgClass = "bg-emerald-500/20 text-emerald-400";
+    textClass = "text-emerald-400";
+  } else {
+    bgClass = "bg-rose-500/20 text-rose-400";
+    textClass = "text-white";
+  }
   return (
     <div
       onDoubleClick={onDoubleClick}
@@ -683,13 +728,10 @@ function TransactionItem({
       <div className="flex items-center gap-3">
         {" "}
         <div
-          className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
-            isIncome
-              ? "bg-emerald-500/20 text-emerald-400"
-              : "bg-rose-500/20 text-rose-400"
-          }`}
+          className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${bgClass}`}
         >
-          {name.charAt(0)}
+          {" "}
+          {isTransfer ? <ArrowRightLeft size={14} /> : name.charAt(0)}{" "}
         </div>{" "}
         <div>
           {" "}
@@ -707,11 +749,7 @@ function TransactionItem({
       </div>{" "}
       <div className="text-right">
         {" "}
-        <span
-          className={`font-bold text-sm block ${
-            isIncome ? "text-emerald-400" : "text-white"
-          }`}
-        >
+        <span className={`font-bold text-sm block ${textClass}`}>
           {displayAmount}
         </span>{" "}
         {status === "pending" && (
