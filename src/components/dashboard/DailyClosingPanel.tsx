@@ -177,7 +177,7 @@ export default function DailyClosingPanel({
             <div className="space-y-2">
               <label className="flex items-center gap-2 text-sm font-medium text-emerald-400">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]"></span>
-                Efectivo (Mano)
+                Efectivo
               </label>
               <div className="relative group">
                 <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-emerald-500 transition-colors">

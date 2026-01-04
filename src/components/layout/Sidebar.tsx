@@ -9,7 +9,7 @@ const menuItems = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Pagos Frecuentes', href: '/recurring', icon: RefreshCcw },
   { name: 'Transacciones', href: '/transactions', icon: ArrowRightLeft },
-  // { name: 'Presupuesto', href: '/budget', icon: PieChart },
+  { name: 'Categorias', href: '/categories', icon: PieChart },
   { name: 'Cuentas', href: '/accounts', icon: Wallet },
   { name: 'Configuración', href: '/settings', icon: Settings },
 ];
@@ -56,7 +56,7 @@ export default function Sidebar() {
       {/* Footer del Sidebar (Usuario) */}
       <div className="mt-auto border-t border-slate-800 pt-4">
         <div className="px-2 py-2 flex items-center gap-3 hover:bg-slate-900/50 rounded-lg cursor-pointer transition-colors">
-          <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-blue-500 to-emerald-500 p-[1px]">
+          <div className="w-9 h-9 rounded-full bg-linear-to-tr from-blue-500 to-emerald-500 p-px">
              <div className="w-full h-full rounded-full bg-slate-950 flex items-center justify-center text-xs text-white font-bold">
                 CA
              </div>
