@@ -8,12 +8,20 @@ import {
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { revalidatePath } from "next/cache";
-
 import { getAuthenticatedUser } from "@/utils/amplify-server-utils";
+
+import {
+  Transaction,
+  Debt,
+  Account,
+  RecurringPayment,
+  Category,
+  ActionResponse,
+} from "./types";
 
 const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "ByteFinanceApp";
 
-async function getUserPK() {
+async function getUserPK(): Promise<string> {
   const user = await getAuthenticatedUser();
   if (!user || !user.id) {
     throw new Error("Unauthorized: Usuario no autenticado.");
@@ -21,41 +29,41 @@ async function getUserPK() {
   return `USER#${user.id}`;
 }
 
-// --- TRANSACCIONES (Historial) ---
+// TRANSACCIONES
 
-export async function saveTransaction(transactionData: {
+type CreateTransactionDTO = Omit<
+  Transaction,
+  "id" | "createdAt" | "source" | "day"
+> & {
   id?: string;
-  name: string;
-  amount: number;
-  type: "income" | "expense";
-  date: string;
-  status: "paid" | "received" | "pending";
-  method?: string;
-  category?: string;
-}) {
+};
+
+export async function saveTransaction(
+  data: CreateTransactionDTO
+): Promise<ActionResponse> {
   try {
     const PK = await getUserPK();
     const timestamp = new Date().toISOString();
-    const uniqueId = transactionData.id || crypto.randomUUID();
+    const uniqueId = data.id || crypto.randomUUID();
 
     const item = {
       PK: PK,
-      SK: `TX#${transactionData.date}#${uniqueId}`,
+      SK: `TX#${data.date}#${uniqueId}`,
       id: uniqueId,
       createdAt: timestamp,
-      ...transactionData,
+      ...data,
     };
 
     await db.send(new PutCommand({ TableName: TABLE_NAME, Item: item }));
     revalidatePath("/");
-    return { success: true };
+    return { success: true, message: "Transacción guardada correctamente" };
   } catch (error) {
     console.error("Error saving transaction:", error);
-    return { success: false };
+    return { success: false, message: "Error al guardar transacción" };
   }
 }
 
-export async function getTransactions() {
+export async function getTransactions(): Promise<Transaction[]> {
   try {
     const PK = await getUserPK();
     const result = await db.send(
@@ -82,21 +90,10 @@ export async function getTransactions() {
         .replace(".", ""),
       createdAt: item.createdAt || item.date,
       source: "manual",
-    }));
+    })) as Transaction[];
   } catch (error) {
     console.error("Error getting transactions:", error);
     return [];
-  }
-}
-
-export async function deleteTransaction(id: string) {
-  try {
-    return {
-      success: false,
-      message: "Use deleteTransactionWithReversal instead",
-    };
-  } catch (error) {
-    return { success: false };
   }
 }
 
@@ -107,11 +104,12 @@ export async function deleteTransactionWithReversal(tx: {
   type: string;
   method?: string;
   name?: string;
-}) {
+}): Promise<ActionResponse> {
   try {
     const PK = await getUserPK();
     const { id, date, amount, type, method, name } = tx;
 
+    // Lógica de reversión de saldos
     if (method) {
       if (type === "expense") {
         await updateAccountBalance(method, Math.abs(amount));
@@ -119,7 +117,6 @@ export async function deleteTransactionWithReversal(tx: {
         await updateAccountBalance(method, -Math.abs(amount));
       } else if (type === "transfer") {
         await updateAccountBalance(method, Math.abs(amount));
-
         if (name && name.startsWith("Traspaso a ")) {
           const toAccountName = name.replace("Traspaso a ", "");
           await updateAccountBalance(toAccountName, -Math.abs(amount));
@@ -137,10 +134,13 @@ export async function deleteTransactionWithReversal(tx: {
     );
 
     revalidatePath("/");
-    return { success: true };
+    return {
+      success: true,
+      message: "Transacción eliminada y saldo revertido",
+    };
   } catch (error) {
     console.error("Error deleting transaction:", error);
-    return { success: false };
+    return { success: false, message: "Error al eliminar transacción" };
   }
 }
 
@@ -160,16 +160,16 @@ export async function editTransactionWithReversal(
     accountName?: string;
     status?: string;
   }
-) {
+): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
 
-    // 1. REVERTIR SALDO ORIGINAL
+    // Revertir saldo original
     if (originalTx.method && originalTx.type !== "transfer") {
       await updateAccountBalance(originalTx.method, -originalTx.amount);
     }
 
-    // 2. PREPARAR NUEVO MONTO Y ESTADO
+    // Preparar nuevos valores
     let finalNewAmount = Math.abs(newValues.amount);
     if (originalTx.type === "expense") {
       finalNewAmount = -finalNewAmount;
@@ -177,7 +177,7 @@ export async function editTransactionWithReversal(
     const newStatus =
       newValues.status || (originalTx.type === "income" ? "received" : "paid");
 
-    // 3. ACTUALIZAR EL REGISTRO EN DYNAMODB
+    // Actualizar DynamoDB
     const sk = `TX#${originalTx.date}#${originalTx.id}`;
 
     await db.send(
@@ -203,7 +203,7 @@ export async function editTransactionWithReversal(
       })
     );
 
-    // 4. APLICAR NUEVO SALDO
+    // Aplicar nuevo saldo
     if (newValues.accountName && originalTx.type !== "transfer") {
       if (newStatus === "paid" || newStatus === "received") {
         await updateAccountBalance(newValues.accountName, finalNewAmount);
@@ -211,101 +211,16 @@ export async function editTransactionWithReversal(
     }
 
     revalidatePath("/");
-    return { success: true };
+    return { success: true, message: "Transacción actualizada" };
   } catch (error) {
     console.error("Error editing transaction:", error);
-    return { success: false, error };
+    return { success: false, message: "Error al editar transacción" };
   }
 }
 
-// --- PAGOS FRECUENTES (/recurring) ---
-
-export async function saveRecurringPayment(data: {
-  id?: string;
-  name: string;
-  amount: number;
-  nextDate: string;
-  frequency: string;
-}) {
-  try {
-    const PK = await getUserPK(); // 👈 ID REAL
-    const id = data.id || crypto.randomUUID();
-
-    await db.send(
-      new PutCommand({
-        TableName: TABLE_NAME,
-        Item: {
-          PK: PK,
-          SK: `REC#${id}`,
-          id: id,
-          name: data.name,
-          amount: data.amount,
-          nextDate: data.nextDate,
-          frequency: data.frequency,
-          updatedAt: new Date().toISOString(),
-        },
-      })
-    );
-    revalidatePath("/recurring");
-    revalidatePath("/");
-    return { success: true };
-  } catch (error) {
-    console.error("Error saving recurring:", error);
-    return { success: false };
-  }
-}
-
-export async function getRecurringPayments() {
-  try {
-    const PK = await getUserPK(); // 👈 ID REAL
-    const result = await db.send(
-      new QueryCommand({
-        TableName: TABLE_NAME,
-        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
-        ExpressionAttributeValues: { ":pk": PK, ":sk": "REC#" },
-      })
-    );
-
-    if (!result.Items) return [];
-
-    return result.Items.map((item) => ({
-      id: item.id,
-      name: item.name,
-      amount: item.amount,
-      nextDate: item.nextDate,
-      frequency: item.frequency,
-    }));
-  } catch (error) {
-    console.error("Error getting recurring:", error);
-    return [];
-  }
-}
-
-export async function deleteRecurringPayment(id: string) {
-  try {
-    const PK = await getUserPK(); // 👈 ID REAL
-    await db.send(
-      new DeleteCommand({
-        TableName: TABLE_NAME,
-        Key: {
-          PK: PK,
-          SK: `REC#${id}`,
-        },
-      })
-    );
-    revalidatePath("/recurring");
-    revalidatePath("/");
-    return { success: true };
-  } catch (error) {
-    console.error("Error borrando:", error);
-    return { success: false };
-  }
-}
-
-/* TRANSACCIONES (/transactions) */
 export async function getTransactionsByMonth(year: number, month: number) {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     const monthStr = month.toString().padStart(2, "0");
     const prefix = `TX#${year}-${monthStr}`;
 
@@ -343,18 +258,95 @@ export async function getTransactionsByMonth(year: number, month: number) {
   }
 }
 
-/* CUENTAS (/accounts) */
-export async function saveAccount(data: {
-  id?: string;
-  name: string;
-  type: string;
-  balance: number;
-  bankName: string;
-  last4?: string;
-  color: string;
-}) {
+// PAGOS RECURRENTES
+
+export async function saveRecurringPayment(
+  data: Partial<RecurringPayment> & {
+    name: string;
+    amount: number;
+    nextDate: string;
+    frequency: string;
+  }
+): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
+    const id = data.id || crypto.randomUUID();
+
+    await db.send(
+      new PutCommand({
+        TableName: TABLE_NAME,
+        Item: {
+          PK: PK,
+          SK: `REC#${id}`,
+          id: id,
+          name: data.name,
+          amount: data.amount,
+          nextDate: data.nextDate,
+          frequency: data.frequency,
+          updatedAt: new Date().toISOString(),
+        },
+      })
+    );
+    revalidatePath("/recurring");
+    revalidatePath("/");
+    return { success: true };
+  } catch (error) {
+    console.error("Error saving recurring:", error);
+    return { success: false };
+  }
+}
+
+export async function getRecurringPayments(): Promise<RecurringPayment[]> {
+  try {
+    const PK = await getUserPK();
+    const result = await db.send(
+      new QueryCommand({
+        TableName: TABLE_NAME,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": PK, ":sk": "REC#" },
+      })
+    );
+    return (result.Items as RecurringPayment[]) || [];
+  } catch (error) {
+    console.error("Error getting recurring:", error);
+    return [];
+  }
+}
+
+export async function deleteRecurringPayment(
+  id: string
+): Promise<ActionResponse> {
+  try {
+    const PK = await getUserPK();
+    await db.send(
+      new DeleteCommand({
+        TableName: TABLE_NAME,
+        Key: { PK: PK, SK: `REC#${id}` },
+      })
+    );
+    revalidatePath("/recurring");
+    revalidatePath("/");
+    return { success: true };
+  } catch (error) {
+    console.error("Error borrando:", error);
+    return { success: false };
+  }
+}
+
+// CUENTAS
+
+export async function saveAccount(
+  data: Partial<Account> & {
+    name: string;
+    type: string;
+    balance: number;
+    color: string;
+    bankName?: string;
+    last4?: string;
+  }
+): Promise<ActionResponse> {
+  try {
+    const PK = await getUserPK();
     const id = data.id || crypto.randomUUID();
 
     await db.send(
@@ -367,7 +359,7 @@ export async function saveAccount(data: {
           name: data.name,
           type: data.type,
           balance: data.balance,
-          bankName: data.bankName,
+          bankName: data.bankName || "",
           last4: data.last4 || "",
           color: data.color,
           updatedAt: new Date().toISOString(),
@@ -382,9 +374,9 @@ export async function saveAccount(data: {
   }
 }
 
-export async function getAccounts() {
+export async function getAccounts(): Promise<Account[]> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     const result = await db.send(
       new QueryCommand({
         TableName: TABLE_NAME,
@@ -393,10 +385,18 @@ export async function getAccounts() {
       })
     );
 
-    // SEEDING: Si el usuario es nuevo y no tiene cuentas, creamos las default
+    // Seeding Default (Si no hay cuentas)
     if (!result.Items || result.Items.length === 0) {
-      console.log("No accounts found for user. Seeding defaults...");
-      const defaults = [
+      console.log("No accounts found. Seeding defaults...");
+
+      // Tipado explícito para que coincida con los parámetros de saveAccount
+      const defaults: Array<{
+        name: string;
+        type: Account["type"];
+        balance: number;
+        bankName: string;
+        color: string;
+      }> = [
         {
           name: "Didi Card",
           type: "debit",
@@ -421,38 +421,25 @@ export async function getAccounts() {
       ];
 
       for (const acc of defaults) {
-        await saveAccount(acc); // Esto usará getUserPK internamente
+        await saveAccount(acc);
       }
-
-      // Volvemos a llamar para obtener las recién creadas
       return getAccounts();
     }
 
-    return result.Items.map((item) => ({
-      id: item.id,
-      name: item.name,
-      type: item.type,
-      balance: item.balance,
-      bankName: item.bankName,
-      last4: item.last4,
-      color: item.color,
-    }));
+    return result.Items as Account[];
   } catch (error) {
     console.error("Error getting accounts:", error);
     return [];
   }
 }
 
-export async function deleteAccount(id: string) {
+export async function deleteAccount(id: string): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     await db.send(
       new DeleteCommand({
         TableName: TABLE_NAME,
-        Key: {
-          PK: PK,
-          SK: `ACC#${id}`,
-        },
+        Key: { PK: PK, SK: `ACC#${id}` },
       })
     );
     revalidatePath("/accounts");
@@ -466,9 +453,9 @@ export async function deleteAccount(id: string) {
 export async function updateAccountBalance(
   accountName: string,
   amount: number
-) {
+): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     const accounts = await getAccounts();
 
     const targetAccount = accounts.find(
@@ -479,16 +466,13 @@ export async function updateAccountBalance(
 
     if (!targetAccount) {
       console.warn(`No se encontró cuenta para: ${accountName}`);
-      return { success: false };
+      return { success: false, message: "Cuenta no encontrada" };
     }
 
     await db.send(
       new UpdateCommand({
         TableName: TABLE_NAME,
-        Key: {
-          PK: PK,
-          SK: `ACC#${targetAccount.id}`,
-        },
+        Key: { PK: PK, SK: `ACC#${targetAccount.id}` },
         UpdateExpression: "set balance = balance + :val, updatedAt = :date",
         ExpressionAttributeValues: {
           ":val": amount,
@@ -506,15 +490,11 @@ export async function updateAccountBalance(
   }
 }
 
-// CATEGORÍAS (CATEGORIES) ---
-export async function saveCategory(data: {
-  id?: string;
-  name: string;
-  color: string;
-  type: "expense" | "income";
-}) {
+// CATEGORÍAS
+
+export async function saveCategory(data: Category): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     const id = data.id || crypto.randomUUID();
 
     await db.send(
@@ -539,9 +519,9 @@ export async function saveCategory(data: {
   }
 }
 
-export async function getCategories() {
+export async function getCategories(): Promise<Category[]> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     const result = await db.send(
       new QueryCommand({
         TableName: TABLE_NAME,
@@ -551,7 +531,7 @@ export async function getCategories() {
     );
 
     if (!result.Items || result.Items.length === 0) {
-      const defaults = [
+      const defaults: Partial<Category>[] = [
         { name: "Comida", color: "bg-orange-500", type: "expense" },
         { name: "Transporte", color: "bg-blue-500", type: "expense" },
         { name: "Casa", color: "bg-indigo-500", type: "expense" },
@@ -560,28 +540,22 @@ export async function getCategories() {
         { name: "Nómina", color: "bg-green-600", type: "income" },
         { name: "Ventas", color: "bg-cyan-500", type: "income" },
       ];
-
       for (const cat of defaults) {
-        await saveCategory(cat as any);
+        await saveCategory(cat as Category);
       }
       return getCategories();
     }
 
-    return result.Items.map((item) => ({
-      id: item.id,
-      name: item.name,
-      color: item.color,
-      type: item.type,
-    }));
+    return result.Items as Category[];
   } catch (error) {
     console.error("Error getting categories:", error);
     return [];
   }
 }
 
-export async function deleteCategory(id: string) {
+export async function deleteCategory(id: string): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     await db.send(
       new DeleteCommand({
         TableName: TABLE_NAME,
@@ -596,19 +570,19 @@ export async function deleteCategory(id: string) {
   }
 }
 
-/* traspasos */
+// TRASPASOS
+
 export async function saveTransfer(data: {
   amount: number;
   date: string;
   fromName: string;
   toName: string;
-}) {
+}): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK(); // 👈 ID REAL
+    const PK = await getUserPK();
     const { amount, date, fromName, toName } = data;
 
     await updateAccountBalance(fromName, -amount);
-
     await updateAccountBalance(toName, amount);
 
     const id = crypto.randomUUID();
@@ -640,7 +614,7 @@ export async function saveTransfer(data: {
   }
 }
 
-// --- PERFIL DE USUARIO Y CONFIGURACIÓN (SK: PROFILE) ---
+// PERFIL DE USUARIO
 
 export async function getUserSettings() {
   try {
@@ -652,7 +626,6 @@ export async function getUserSettings() {
         ExpressionAttributeValues: { ":pk": PK, ":sk": "PROFILE" },
       })
     );
-
     return result.Items && result.Items.length > 0 ? result.Items[0] : null;
   } catch (error) {
     console.error("Error getting settings:", error);
@@ -660,16 +633,16 @@ export async function getUserSettings() {
   }
 }
 
-export async function updateUserSettings(data: { 
+export async function updateUserSettings(data: {
   name: string;
   email: string;
   currency: string;
   budgetLimit: string;
   notifications: boolean;
-}) {
+}): Promise<ActionResponse> {
   try {
     const PK = await getUserPK();
-    
+
     await db.send(
       new PutCommand({
         TableName: TABLE_NAME,
@@ -681,7 +654,7 @@ export async function updateUserSettings(data: {
         },
       })
     );
-    
+
     revalidatePath("/settings");
     return { success: true };
   } catch (error) {
@@ -690,47 +663,18 @@ export async function updateUserSettings(data: {
   }
 }
 
-// --- EXPORTAR DATOS (Backup) ---
-export async function getFullUserDataForExport() {
-  try {
-    const transactions = await getTransactions();
-    const accounts = await getAccounts();
-    const categories = await getCategories();
-    const recurring = await getRecurringPayments();
-    const profile = await getUserSettings();
+// DEUDAS
 
-    return {
-      profile,
-      accounts,
-      categories,
-      transactions,
-      recurring,
-      exportedAt: new Date().toISOString(),
-    };
-  } catch (error) {
-    console.error("Error exporting data:", error);
-    return null;
-  }
-}
-
-// --- DEUDAS (DEBTS) ---
-
-export async function saveDebt(data: {
-  id?: string;
-  name: string;
-  totalAmount: number;
-  currentBalance?: number;
-  minimumPayment?: number;
-  nextPaymentDate: string; 
-  paymentFrequency: 'weekly' | 'biweekly' | 'monthly'; 
-  
-  totalInstallments?: number;
-  installmentsPaid?: number;
-}) {
+export async function saveDebt(
+  data: Omit<Debt, "id" | "updatedAt"> & { id?: string }
+): Promise<ActionResponse> {
   try {
     const PK = await getUserPK();
     const id = data.id || crypto.randomUUID();
-    const currentBalance = data.currentBalance !== undefined ? data.currentBalance : data.totalAmount;
+    const currentBalance =
+      data.currentBalance !== undefined
+        ? data.currentBalance
+        : data.totalAmount;
 
     await db.send(
       new PutCommand({
@@ -741,9 +685,9 @@ export async function saveDebt(data: {
           id: id,
           updatedAt: new Date().toISOString(),
           ...data,
-          currentBalance, 
+          currentBalance,
           installmentsPaid: data.installmentsPaid || 0,
-          minimumPayment: data.minimumPayment || 0
+          minimumPayment: data.minimumPayment || 0,
         },
       })
     );
@@ -755,7 +699,7 @@ export async function saveDebt(data: {
   }
 }
 
-export async function getDebts() {
+export async function getDebts(): Promise<Debt[]> {
   try {
     const PK = await getUserPK();
     const result = await db.send(
@@ -765,92 +709,91 @@ export async function getDebts() {
         ExpressionAttributeValues: { ":pk": PK, ":sk": "DEBT#" },
       })
     );
-    return result.Items || [];
+    return (result.Items as Debt[]) || [];
   } catch (error) {
     console.error("Error getting debts:", error);
     return [];
   }
 }
 
-export async function deleteDebt(id: string) {
+export async function deleteDebt(id: string): Promise<ActionResponse> {
   try {
     const PK = await getUserPK();
-    await db.send(new DeleteCommand({ TableName: TABLE_NAME, Key: { PK, SK: `DEBT#${id}` } }));
+    await db.send(
+      new DeleteCommand({
+        TableName: TABLE_NAME,
+        Key: { PK, SK: `DEBT#${id}` },
+      })
+    );
     revalidatePath("/debts");
     return { success: true };
   } catch (error) {
-    return { success: false };
+    console.error("Error deleting debt:", error);
+    return { success: false, message: "Error al eliminar la deuda" };
   }
 }
 
-// ESTA ES LA FUNCIÓN CLAVE: Registra el pago y baja la deuda
 export async function registerDebtPayment(
-  debtId: string, 
-  paymentData: { 
-    amount: number; 
-    date: string; 
-    accountName: string; 
+  debtId: string,
+  paymentData: {
+    amount: number;
+    date: string;
+    accountName: string;
     debtName: string;
-    isInstallment: boolean; 
+    isInstallment: boolean;
   }
-) {
+): Promise<ActionResponse> {
   try {
-    const PK = await getUserPK();
-    
-    // 1. Obtener la deuda actual
     const debts = await getDebts();
-    const debt = debts.find(d => d.id === debtId);
+    const debt = debts.find((d) => d.id === debtId);
     if (!debt) throw new Error("Deuda no encontrada");
 
-    // 2. Calcular nuevos valores (Saldo y Pagos Hechos)
     const newBalance = Math.max(0, debt.currentBalance - paymentData.amount);
-    const newInstallmentsPaid = paymentData.isInstallment ? (debt.installmentsPaid || 0) + 1 : (debt.installmentsPaid || 0);
+    const newInstallmentsPaid = paymentData.isInstallment
+      ? (debt.installmentsPaid || 0) + 1
+      : debt.installmentsPaid || 0;
 
-    // 3. CALCULAR NUEVA FECHA (¡ESTO FALTABA!) 📅
-    // Solo actualizamos la fecha si es un pago de cuota oficial (isInstallment)
-    // O si prefieres que SIEMPRE se mueva la fecha al pagar, quita el "if (paymentData.isInstallment)"
-    let newNextDate = debt.nextPaymentDate; 
-    
-    if (paymentData.isInstallment || newBalance > 0) { 
-        const current = new Date(debt.nextPaymentDate + "T12:00:00");
-        const next = new Date(current);
-        const freq = debt.paymentFrequency || 'monthly';
+    let newNextDate = debt.nextPaymentDate;
 
-        if (freq === 'weekly') next.setDate(current.getDate() + 7);
-        else if (freq === 'biweekly') next.setDate(current.getDate() + 15);
-        else if (freq === 'monthly') next.setMonth(current.getMonth() + 1); // Mensual
-        
-        newNextDate = next.toLocaleDateString('en-CA');
+    if (paymentData.isInstallment || newBalance > 0) {
+      const current = new Date(debt.nextPaymentDate + "T12:00:00");
+      const next = new Date(current);
+      const freq = debt.paymentFrequency || "monthly";
+
+      if (freq === "weekly") next.setDate(current.getDate() + 7);
+      else if (freq === "biweekly") next.setDate(current.getDate() + 15);
+      else if (freq === "monthly") next.setMonth(current.getMonth() + 1);
+
+      newNextDate = next.toLocaleDateString("en-CA");
     }
 
-    // 4. Registrar la Transacción (Gasto)
     await saveTransaction({
-        name: `Pago: ${paymentData.debtName}`,
-        amount: -Math.abs(paymentData.amount),
-        type: 'expense',
-        date: paymentData.date,
-        status: 'paid',
-        method: paymentData.accountName,
-        category: 'Deudas'
+      name: `Pago: ${paymentData.debtName}`,
+      amount: -Math.abs(paymentData.amount),
+      type: "expense",
+      date: paymentData.date,
+      status: "paid",
+      method: paymentData.accountName,
+      category: "Deudas",
     });
 
-    // 5. Descontar dinero de la Cuenta
-    await updateAccountBalance(paymentData.accountName, -Math.abs(paymentData.amount));
+    await updateAccountBalance(
+      paymentData.accountName,
+      -Math.abs(paymentData.amount)
+    );
 
-    // 6. Actualizar la Deuda (Saldo + Pagos + FECHA)
     await saveDebt({
-        ...debt,
-        currentBalance: newBalance,
-        installmentsPaid: newInstallmentsPaid,
-        nextPaymentDate: newNextDate // <--- Aquí guardamos la nueva fecha
+      ...debt,
+      currentBalance: newBalance,
+      installmentsPaid: newInstallmentsPaid,
+      nextPaymentDate: newNextDate,
     });
 
     revalidatePath("/debts");
     revalidatePath("/");
     return { success: true };
-
   } catch (error) {
     console.error("Error paying debt:", error);
-    return { success: false };
+    return { success: false, message: "Error al registrar pago de deuda" };
   }
 }

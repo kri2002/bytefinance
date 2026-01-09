@@ -1,33 +1,47 @@
-import { createServerRunner } from '@aws-amplify/adapter-nextjs';
-import { fetchAuthSession } from 'aws-amplify/auth/server';
+import { createServerRunner } from "@aws-amplify/adapter-nextjs";
+import { fetchAuthSession } from "aws-amplify/auth/server";
+import { cookies } from "next/headers";
 
 export const { runWithAmplifyServerContext } = createServerRunner({
   config: {
     Auth: {
       Cognito: {
         userPoolId: process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID!,
-        userPoolClientId: process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID!
-      }
-    }
-  }
+        userPoolClientId: process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID!,
+      },
+    },
+  },
 });
 
-export async function getAuthenticatedUser() {
+export interface AuthUser {
+  id: string;
+  email?: string;
+}
+
+export async function getAuthenticatedUser(): Promise<AuthUser | null> {
   try {
-    const user = await runWithAmplifyServerContext({
-      nextServerContext: { cookies: require('next/headers').cookies },
+    const sessionPayload = await runWithAmplifyServerContext({
+      nextServerContext: { cookies },
       operation: async (contextSpec) => {
-        const session = await fetchAuthSession(contextSpec);
-        return session.tokens?.idToken?.payload;
-      }
+        try {
+          const session = await fetchAuthSession(contextSpec);
+          return session.tokens?.idToken?.payload;
+        } catch { 
+          return null;
+        }
+      },
     });
-    
-    if (!user || !user.sub) return null;
-    
-    // 'sub' es el ID único e inmutable del usuario en Cognito
-    return { id: user.sub, email: user.email };
+
+    if (!sessionPayload || !sessionPayload.sub) {
+      return null;
+    }
+
+    return {
+      id: sessionPayload.sub,
+      email: typeof sessionPayload.email === "string" ? sessionPayload.email : undefined,
+    };
   } catch (error) {
-    console.error("Auth error:", error);
+    console.error("Auth error in getAuthenticatedUser:", error);
     return null;
   }
 }

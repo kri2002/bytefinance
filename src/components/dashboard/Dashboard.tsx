@@ -1,14 +1,14 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   Wallet,
+  LucideIcon,
   TrendingUp,
   TrendingDown,
   DollarSign,
   X,
-  LucideIcon,
   PlusCircle,
   ArrowRight,
   MinusCircle,
@@ -34,57 +34,51 @@ import {
   saveRecurringPayment,
   updateAccountBalance,
   saveTransfer,
-  deleteTransactionWithReversal,
   editTransactionWithReversal,
-  registerDebtPayment, // Importamos la acción de pago de deuda
+  registerDebtPayment,
 } from "@/lib/actions";
 
-// Interfaces
-interface Transaction {
-  id: string | number;
-  name: string;
-  day: string;
+// IMPORTAMOS TIPOS CENTRALIZADOS
+import {
+  Transaction,
+  Category,
+  Account,
+  RecurringPayment,
+  Debt,
+} from "@/lib/types";
+
+/* types */
+
+type DailyClosingValues = {
   date: string;
-  amount: number;
-  type: "income" | "expense" | "transfer";
-  status: "paid" | "received" | "pending";
-  source?: "recurring" | "manual";
+  didi: string | number;
+  uber: string | number;
+  cash: string | number;
+};
+
+type TransactionFormValues = {
+  name: string;
+  amount: string | number;
+  date: string;
   category?: string;
-  method?: string;
-  createdAt?: string;
-}
+  accountName?: string;
+  status?: "paid" | "received" | "pending";
+};
 
-interface Category {
-  id: string;
-  name: string;
-  color: string;
-  type: "income" | "expense";
-}
-interface Account {
-  id: string;
-  name: string;
-  color: string;
-  type: string;
-  balance: number;
-}
-interface RecurringPayment {
-  id: string;
-  name: string;
-  amount: number;
-  nextDate: string;
-  frequency?: string;
-}
+type WithdrawalFormValues = {
+  amount: string | number;
+  date: string;
+  fromAccountId: string;
+};
 
-// 1. INTERFAZ ACTUALIZADA (Agregamos totalInstallments)
-interface Debt {
-  id: string;
-  name: string;
-  currentBalance: number;
-  minimumPayment: number;
-  nextPaymentDate: string;
-  totalInstallments?: number; // Para saber si es a meses
-}
+type TransferFormValues = {
+  amount: string | number;
+  date: string;
+  fromName: string;
+  toName: string;
+};
 
+// PROPS
 interface DashboardProps {
   initialData: Transaction[];
   recurringConfig: RecurringPayment[];
@@ -93,6 +87,7 @@ interface DashboardProps {
   debts: Debt[];
 }
 
+// Configuración Toast
 const Toast = Swal.mixin({
   toast: true,
   position: "top-end",
@@ -110,18 +105,16 @@ const Toast = Swal.mixin({
 });
 
 export default function Dashboard({
-  initialData,
-  recurringConfig,
-  categories,
-  accounts,
+  initialData = [],
+  recurringConfig = [],
+  categories = [],
+  accounts = [],
   debts = [],
 }: DashboardProps) {
   const router = useRouter();
 
   // --- ESTADOS ---
-  const [transactions, setTransactions] = useState<Transaction[]>(
-    initialData || []
-  );
+  const [transactions, setTransactions] = useState<Transaction[]>(initialData);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [currentDate, setCurrentDate] = useState(new Date());
 
@@ -138,13 +131,12 @@ export default function Dashboard({
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
 
   useEffect(() => {
-    setTransactions(initialData || []);
+    setTransactions(initialData);
   }, [initialData]);
 
-  // --- RECURRENTES Y DEUDAS (Lógica Unificada) ---
-  useEffect(() => {
+  // --- LOGICA DE PROYECCIÓN (RECURRENTES + DEUDAS) ---
+  const generateProjections = useCallback(() => {
     const today = new Date();
-    // Calcular fin de semana (Domingo)
     const endOfWeek = new Date(today);
     const dayOfWeek = today.getDay();
     const diffToEnd = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
@@ -152,97 +144,89 @@ export default function Dashboard({
     endOfWeek.setHours(23, 59, 59, 999);
 
     const dayNames = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
-    const newTxToAdd: Transaction[] = [];
+    const projections: Transaction[] = [];
 
-    // 1. PROCESAR SUSCRIPCIONES
-    if (recurringConfig && recurringConfig.length > 0) {
-      recurringConfig.forEach((rec) => {
-        const dueDate = new Date(rec.nextDate + "T12:00:00");
-        const isDueThisWeek = dueDate <= endOfWeek;
+    // Proyecciones de Suscripciones
+    recurringConfig.forEach((rec) => {
+      const dueDate = new Date(rec.nextDate + "T12:00:00");
+      if (dueDate <= endOfWeek) {
+        const alreadyPaid = transactions.find(
+          (t) =>
+            t.name === rec.name &&
+            t.type === "expense" &&
+            (t.status === "paid" || t.status === "pending") &&
+            t.source !== "recurring" &&
+            t.date.substring(0, 7) === rec.nextDate.substring(0, 7)
+        );
 
-        if (isDueThisWeek) {
-          const alreadyPaid = transactions.find(
+        if (!alreadyPaid) {
+          projections.push({
+            id: `pending-${rec.id}`,
+            name: rec.name,
+            day: dayNames[dueDate.getDay()],
+            date: rec.nextDate,
+            amount: -Math.abs(rec.amount),
+            type: "expense",
+            status: "pending",
+            source: "recurring",
+            category: "Suscripciones",
+          });
+        }
+      }
+    });
+
+    // Proyecciones de Deudas
+    debts.forEach((debt) => {
+      if (debt.currentBalance > 0.1) {
+        const dueDate = new Date(debt.nextPaymentDate + "T12:00:00");
+        if (dueDate <= endOfWeek) {
+          const paidToday = transactions.find(
             (t) =>
-              t.name === rec.name &&
-              t.type === "expense" &&
-              (t.status === "paid" || t.status === "pending") &&
-              t.source !== "recurring" &&
-              t.date.substring(0, 7) === rec.nextDate.substring(0, 7)
+              t.name.includes(debt.name) &&
+              t.date === new Date().toLocaleDateString("en-CA")
           );
 
-          if (!alreadyPaid) {
-            const dayName = dayNames[dueDate.getDay()];
-            newTxToAdd.push({
-              id: `pending-${rec.id}`,
-              name: rec.name,
-              day: dayName,
-              date: rec.nextDate,
-              amount: -Math.abs(rec.amount),
+          if (!paidToday) {
+            projections.push({
+              id: `pending-debt-${debt.id}`,
+              name: `Pago: ${debt.name}`,
+              day: dayNames[dueDate.getDay()],
+              date: debt.nextPaymentDate,
+              amount: -Math.abs(
+                debt.minimumPayment > 0
+                  ? debt.minimumPayment
+                  : debt.currentBalance
+              ),
               type: "expense",
               status: "pending",
               source: "recurring",
-              category: "Suscripciones",
+              category: "Deudas",
             });
           }
         }
-      });
-    }
+      }
+    });
 
-    // 2. PROCESAR DEUDAS
-    if (debts && debts.length > 0) {
-      debts.forEach((debt) => {
-        if (debt.currentBalance > 0.1) {
-          // Solo si hay deuda activa
-          const dueDate = new Date(debt.nextPaymentDate + "T12:00:00");
+    return projections;
+  }, [recurringConfig, debts, transactions]);
 
-          // Si vence esta semana (o antes)
-          if (dueDate <= endOfWeek) {
-            // Verificar si ya se pagó HOY (para no duplicar en el mismo día)
-            const paidToday = transactions.find(
-              (t) =>
-                t.name.includes(debt.name) &&
-                t.date === new Date().toLocaleDateString("en-CA")
-            );
-
-            if (!paidToday) {
-              const dayName = dayNames[dueDate.getDay()];
-              newTxToAdd.push({
-                id: `pending-debt-${debt.id}`,
-                name: `Pago: ${debt.name}`,
-                day: dayName,
-                date: debt.nextPaymentDate,
-                // Sugerimos Pago Mínimo, o el Saldo Total si es menor
-                amount: -Math.abs(
-                  debt.minimumPayment > 0
-                    ? debt.minimumPayment
-                    : debt.currentBalance
-                ),
-                type: "expense",
-                status: "pending",
-                source: "recurring",
-                category: "Deudas",
-              });
-            }
-          }
-        }
-      });
-    }
-
-    if (newTxToAdd.length > 0) {
+  // Efecto único para mezclar transacciones reales + proyecciones
+  useEffect(() => {
+    const projections = generateProjections();
+    if (projections.length > 0) {
       setTransactions((prev) => {
         const cleanPrev = prev.filter(
           (p) => !p.id.toString().startsWith("pending-")
         );
-        const combined = [...cleanPrev, ...newTxToAdd];
-        // Ordenar por fecha
+        const combined = [...cleanPrev, ...projections];
         return combined.sort(
           (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
         );
       });
     }
-  }, [initialData, recurringConfig, debts]);
+  }, [generateProjections]);
 
-  // --- CONTROL DE PANELES ---
+  // CONTROL DE PANELES
   const closeAllPanels = () => {
     setIsExpensePanelOpen(false);
     setIsIncomePanelOpen(false);
@@ -252,97 +236,98 @@ export default function Dashboard({
     setTimeout(() => setEditingTx(null), 300);
   };
 
-  // --- HANDLERS DE PAGO Y COBRO ---
-
-  // Lógica unificada para procesar el pago (Suscripción o Deuda)
+  // LOGICA DE PAGOS
   const processPayment = async (accountName: string) => {
     if (!paymentTx) return;
     const todayISO = new Date().toLocaleDateString("en-CA");
     const amountVal = Math.abs(paymentTx.amount);
 
-    // CASO 1: PAGO DE DEUDA (ID empieza con pending-debt-)
-    if (paymentTx.id.toString().startsWith("pending-debt-")) {
-      const originalDebtId = paymentTx.id
-        .toString()
-        .replace("pending-debt-", "");
+    try {
+      // DEUDA
+      if (paymentTx.id.toString().startsWith("pending-debt-")) {
+        const debtId = paymentTx.id.toString().replace("pending-debt-", "");
+        const associatedDebt = debts.find((d) => d.id === debtId);
 
-      // 2. BUSCAMOS LA DEUDA PARA SABER SI ES A MESES
-      const associatedDebt = debts.find((d) => d.id === originalDebtId);
-      // Si tiene totalInstallments > 0, significa que es a meses y debemos sumar +1 pago
-      const shouldMarkInstallment = associatedDebt?.totalInstallments
-        ? associatedDebt.totalInstallments > 0
-        : false;
+        // Validación de seguridad
+        if (!associatedDebt) throw new Error("Deuda no encontrada");
 
-      // Usamos la acción especial de deuda que actualiza saldo y registro
-      await registerDebtPayment(originalDebtId, {
-        amount: amountVal,
-        date: todayISO,
-        accountName: accountName,
-        debtName: paymentTx.name.replace("Pago: ", ""), // Limpiamos el nombre
-        isInstallment: shouldMarkInstallment, // <--- CORRECCIÓN AQUÍ
-      });
+        const isInstallment = associatedDebt.totalInstallments
+          ? associatedDebt.totalInstallments > 0
+          : false;
 
-      Toast.fire({ icon: "success", title: "Abono a deuda registrado" });
-    }
-    // CASO 2: PAGO DE SUSCRIPCIÓN (ID empieza con pending-)
-    else if (paymentTx.id.toString().startsWith("pending-")) {
-      // Guardar transacción
-      await saveTransaction({
-        name: paymentTx.name,
-        amount: paymentTx.amount,
-        type: "expense",
-        date: todayISO,
-        status: "paid",
-        method: accountName,
-        category: "Suscripciones",
-      });
-
-      // Actualizar próxima fecha
-      const originalRecurringId = paymentTx.id
-        .toString()
-        .replace("pending-", "");
-      const config = recurringConfig.find((r) => r.id === originalRecurringId);
-
-      if (config) {
-        const current = new Date(config.nextDate + "T12:00:00");
-        const next = new Date(current);
-        const freq = config.frequency || "monthly";
-
-        if (freq === "weekly") next.setDate(current.getDate() + 7);
-        if (freq === "biweekly") next.setDate(current.getDate() + 15);
-        if (freq === "monthly") next.setMonth(current.getMonth() + 1);
-        if (freq === "yearly") next.setFullYear(current.getFullYear() + 1);
-
-        await saveRecurringPayment({
-          id: config.id,
-          name: config.name,
-          amount: config.amount,
-          frequency: freq,
-          nextDate: next.toLocaleDateString("en-CA"),
+        await registerDebtPayment(debtId, {
+          amount: amountVal,
+          date: todayISO,
+          accountName,
+          debtName: paymentTx.name.replace("Pago: ", ""),
+          isInstallment,
         });
-      }
-      await updateAccountBalance(accountName, -amountVal);
-      Toast.fire({ icon: "success", title: "Suscripción pagada" });
-    }
-    // CASO 3: TRANSACCIÓN MANUAL PENDIENTE
-    else {
-      await saveTransaction({
-        id: paymentTx.id.toString(),
-        name: paymentTx.name,
-        amount: paymentTx.amount,
-        type: "expense",
-        date: paymentTx.date,
-        status: "paid",
-        method: accountName,
-        category: paymentTx.category,
-      });
-      await updateAccountBalance(accountName, -amountVal);
-      Toast.fire({ icon: "success", title: "Pago registrado" });
-    }
 
-    setPaymentTx(null);
-    setIsCardSelectorOpen(false);
-    router.refresh();
+        Toast.fire({ icon: "success", title: "Abono a deuda registrado" });
+      }
+      // SUSCRIPCIÓN
+      else if (paymentTx.id.toString().startsWith("pending-")) {
+        const recId = paymentTx.id.toString().replace("pending-", "");
+        const config = recurringConfig.find((r) => r.id === recId);
+
+        // Guardar Gasto
+        await saveTransaction({
+          name: paymentTx.name,
+          amount: paymentTx.amount,
+          type: "expense",
+          date: todayISO,
+          status: "paid",
+          method: accountName,
+          category: "Suscripciones",
+        });
+
+        // Calcular siguiente fecha
+        if (config) {
+          const current = new Date(config.nextDate + "T12:00:00");
+          const next = new Date(current);
+          const freq = config.frequency || "monthly";
+
+          if (freq === "weekly") next.setDate(current.getDate() + 7);
+          else if (freq === "biweekly") next.setDate(current.getDate() + 15);
+          else if (freq === "monthly") next.setMonth(current.getMonth() + 1);
+          else if (freq === "yearly")
+            next.setFullYear(current.getFullYear() + 1);
+
+          await saveRecurringPayment({
+            id: config.id,
+            name: config.name,
+            amount: config.amount,
+            frequency: freq,
+            nextDate: next.toLocaleDateString("en-CA"),
+          });
+        }
+
+        await updateAccountBalance(accountName, -amountVal);
+        Toast.fire({ icon: "success", title: "Suscripción pagada" });
+      }
+      // MANUAL
+      else {
+        await saveTransaction({
+          id: paymentTx.id.toString(),
+          name: paymentTx.name,
+          amount: paymentTx.amount,
+          type: "expense",
+          date: paymentTx.date,
+          status: "paid",
+          method: accountName,
+          category: paymentTx.category,
+        });
+        await updateAccountBalance(accountName, -amountVal);
+        Toast.fire({ icon: "success", title: "Pago registrado" });
+      }
+
+      setPaymentTx(null);
+      setIsCardSelectorOpen(false);
+      router.refresh();
+    } catch (error) {
+      console.error("Error procesando pago:", error);
+      Toast.fire({ icon: "error", title: "Error al procesar el pago" });
+    }
   };
 
   const handleConfirmMethod = (method: "cash" | "card") => {
@@ -355,169 +340,270 @@ export default function Dashboard({
       setIsCardSelectorOpen(true);
     }
   };
-  const handleSelectCard = (account: Account) => {
-    processPayment(account.name);
-  };
 
-  // --- OTROS HANDLERS (Guardar, Editar, Borrar) ---
-  const handleSaveClosing = async (values: any) => {
+  // HANDLERS FORMULARIOS
+  const handleSaveClosing = async (values: DailyClosingValues) => {
     const dateString = values.date;
     const promises = [];
-    if (Number(values.didi) !== 0) {
-      promises.push(
-        saveTransaction({
-          name: "Didi Card (Ingreso)",
-          amount: Number(values.didi),
-          type: "income",
-          date: dateString,
-          status: "received",
-          method: "Didi Card",
-          category: "Ingreso",
-        })
-      );
-      promises.push(updateAccountBalance("Didi Card", Number(values.didi)));
+
+    const platforms: {
+      key: keyof Omit<DailyClosingValues, "date">;
+      name: string;
+      acc: string;
+    }[] = [
+      { key: "didi", name: "Didi Card (Ingreso)", acc: "Didi Card" },
+      { key: "uber", name: "Uber Card (Ingreso)", acc: "Uber Card" },
+      { key: "cash", name: "Efectivo (Mano)", acc: "Efectivo" },
+    ];
+
+    for (const p of platforms) {
+      const amount = Number(values[p.key]);
+
+      if (!isNaN(amount) && amount !== 0) {
+        promises.push(
+          saveTransaction({
+            name: p.name,
+            amount,
+            type: "income",
+            date: dateString,
+            status: "received",
+            method: p.acc,
+            category: "Ingreso",
+          })
+        );
+        promises.push(updateAccountBalance(p.acc, amount));
+      }
     }
-    if (Number(values.uber) !== 0) {
-      promises.push(
-        saveTransaction({
-          name: "Uber Card (Ingreso)",
-          amount: Number(values.uber),
-          type: "income",
-          date: dateString,
-          status: "received",
-          method: "Uber Card",
-          category: "Ingreso",
-        })
-      );
-      promises.push(updateAccountBalance("Uber Card", Number(values.uber)));
-    }
-    if (Number(values.cash) !== 0) {
-      promises.push(
-        saveTransaction({
-          name: "Efectivo (Mano)",
-          amount: Number(values.cash),
-          type: "income",
-          date: dateString,
-          status: "received",
-          method: "Efectivo",
-          category: "Ingreso",
-        })
-      );
-      promises.push(updateAccountBalance("Efectivo", Number(values.cash)));
-    }
+
     await Promise.all(promises);
     closeAllPanels();
     Toast.fire({ icon: "success", title: "Cierre guardado" });
     router.refresh();
   };
 
-  const handleSaveIncome = async (values: any, isEdit?: boolean) => {
-    const amountVal = Math.abs(Number(values.amount));
-    if (isEdit && editingTx) {
-      await editTransactionWithReversal(
-        {
-          id: editingTx.id.toString(),
-          date: editingTx.date,
-          amount: editingTx.amount,
-          type: editingTx.type,
-          method: editingTx.method,
-        },
-        {
+  const handleSaveIncome = async (
+    values: TransactionFormValues,
+    isEdit?: boolean
+  ) => {
+    const rawAmount = Number(values.amount);
+
+    if (isNaN(rawAmount) || rawAmount === 0) {
+      Toast.fire({ icon: "warning", title: "El monto debe ser válido" });
+      return;
+    }
+
+    const amountVal = Math.abs(rawAmount);
+
+    try {
+      if (isEdit && editingTx) {
+        await editTransactionWithReversal(
+          {
+            id: editingTx.id.toString(),
+            date: editingTx.date,
+            amount: editingTx.amount,
+            type: editingTx.type,
+            method: editingTx.method,
+          },
+          {
+            name: values.name,
+            amount: amountVal,
+            date: values.date,
+            category: values.category,
+            accountName: values.accountName,
+          }
+        );
+        Toast.fire({ icon: "success", title: "Ingreso actualizado" });
+      } else {
+        await saveTransaction({
           name: values.name,
           amount: amountVal,
+          type: "income",
           date: values.date,
+          status: "received",
           category: values.category,
-          accountName: values.accountName,
+          method: values.accountName,
+        });
+
+        if (values.accountName) {
+          await updateAccountBalance(values.accountName, amountVal);
         }
-      );
-      Toast.fire({ icon: "success", title: "Ingreso actualizado" });
-    } else {
-      await saveTransaction({
-        name: values.name,
-        amount: amountVal,
-        type: "income",
-        date: values.date,
-        status: "received",
-        category: values.category,
-        method: values.accountName,
-      });
-      if (values.accountName)
-        await updateAccountBalance(values.accountName, amountVal);
-      Toast.fire({ icon: "success", title: "Ingreso registrado" });
+
+        Toast.fire({ icon: "success", title: "Ingreso registrado" });
+      }
+
+      closeAllPanels();
+      router.refresh();
+    } catch (error) {
+      console.error("Error saving income:", error);
+      Toast.fire({ icon: "error", title: "Ocurrió un error al guardar" });
     }
-    closeAllPanels();
-    router.refresh();
   };
 
-  const handleSaveExpense = async (values: any, isEdit?: boolean) => {
-    const amountVal = Math.abs(Number(values.amount));
-    if (isEdit && editingTx) {
-      await editTransactionWithReversal(
-        {
-          id: editingTx.id.toString(),
-          date: editingTx.date,
-          amount: editingTx.amount,
-          type: editingTx.type,
-          method: editingTx.method,
-        },
-        {
+  const handleSaveExpense = async (
+    values: TransactionFormValues,
+    isEdit?: boolean
+  ) => {
+    const rawAmount = Number(values.amount);
+
+    if (isNaN(rawAmount) || rawAmount === 0) {
+      Toast.fire({ icon: "warning", title: "El monto debe ser válido" });
+      return;
+    }
+
+    const amountVal = Math.abs(rawAmount);
+
+    try {
+      if (isEdit && editingTx) {
+        // Lógica de Edición
+        await editTransactionWithReversal(
+          {
+            id: editingTx.id.toString(),
+            date: editingTx.date,
+            amount: editingTx.amount,
+            type: editingTx.type,
+            method: editingTx.method,
+          },
+          {
+            name: values.name,
+            amount: amountVal,
+            date: values.date,
+            category: values.category,
+            accountName: values.accountName,
+            status: values.status,
+          }
+        );
+        Toast.fire({ icon: "success", title: "Gasto actualizado" });
+      } else {
+        // Lógica de Creación
+        const currentStatus = values.status || "paid";
+
+        await saveTransaction({
           name: values.name,
-          amount: amountVal,
+          amount: -amountVal,
+          type: "expense",
           date: values.date,
+          status: currentStatus,
           category: values.category,
-          accountName: values.accountName,
-          status: values.status,
+          method: values.accountName,
+        });
+
+        if (currentStatus === "paid" && values.accountName) {
+          await updateAccountBalance(values.accountName, -amountVal);
         }
-      );
-      Toast.fire({ icon: "success", title: "Gasto actualizado" });
-    } else {
-      await saveTransaction({
-        name: values.name,
-        amount: -amountVal,
-        type: "expense",
-        date: values.date,
-        status: values.status,
-        category: values.category,
-        method: values.accountName,
+
+        Toast.fire({ icon: "success", title: "Gasto registrado" });
+      }
+
+      closeAllPanels();
+      router.refresh();
+    } catch (error) {
+      console.error("Error saving expense:", error);
+      Toast.fire({
+        icon: "error",
+        title: "Ocurrió un error al guardar el gasto",
       });
-      if (values.status === "paid" && values.accountName)
-        await updateAccountBalance(values.accountName, -amountVal);
-      Toast.fire({ icon: "success", title: "Gasto registrado" });
     }
-    closeAllPanels();
-    router.refresh();
   };
 
-  const handleSaveWithdrawal = async (values: any) => {
-    const fromAcc = accounts.find((a) => a.id === values.fromAccountId);
-    const cashAcc = accounts.find(
-      (a) => a.type === "cash" || a.name.toLowerCase().includes("efectivo")
-    );
-    if (fromAcc && cashAcc) {
+  const handleSaveWithdrawal = async (values: WithdrawalFormValues) => {
+    const rawAmount = Number(values.amount);
+
+    if (isNaN(rawAmount) || rawAmount <= 0) {
+      Toast.fire({
+        icon: "warning",
+        title: "Ingresa un monto válido mayor a 0",
+      });
+      return;
+    }
+
+    if (!values.fromAccountId) {
+      Toast.fire({ icon: "warning", title: "Selecciona una cuenta de origen" });
+      return;
+    }
+
+    try {
+      const fromAcc = accounts.find((a) => a.id === values.fromAccountId);
+
+      const cashAcc = accounts.find(
+        (a) => a.type === "cash" || a.name.toLowerCase().includes("efectivo")
+      );
+
+      if (!fromAcc) {
+        throw new Error("La cuenta de origen seleccionada no existe.");
+      }
+
+      if (!cashAcc) {
+        throw new Error(
+          "No se encontró una cuenta de 'Efectivo' para recibir el dinero."
+        );
+      }
+
       await saveTransfer({
-        amount: Math.abs(Number(values.amount)),
+        amount: Math.abs(rawAmount),
         date: values.date,
         fromName: fromAcc.name,
         toName: cashAcc.name,
       });
-      Toast.fire({ icon: "success", title: "Retiro registrado" });
-    } else {
-      Toast.fire({ icon: "error", title: "Error: Falta cuenta de Efectivo" });
+
+      Toast.fire({ icon: "success", title: "Retiro registrado exitosamente" });
+      closeAllPanels();
+      router.refresh();
+    } catch (error) {
+      console.error("Error processing withdrawal:", error);
+      const msg =
+        error instanceof Error ? error.message : "Error al registrar el retiro";
+      Toast.fire({ icon: "error", title: msg });
     }
-    closeAllPanels();
-    router.refresh();
   };
 
-  const handleSaveTransfer = async (values: any) => {
-    await saveTransfer({
-      amount: Math.abs(Number(values.amount)),
-      date: values.date,
-      fromName: values.fromName,
-      toName: values.toName,
-    });
-    closeAllPanels();
-    Toast.fire({ icon: "success", title: "Transferencia exitosa" });
-    router.refresh();
+  const handleSaveTransfer = async (values: TransferFormValues) => {
+    const rawAmount = Number(values.amount);
+
+    if (isNaN(rawAmount) || rawAmount <= 0) {
+      Toast.fire({ icon: "warning", title: "El monto debe ser mayor a 0" });
+      return;
+    }
+
+    if (!values.fromName || !values.toName) {
+      Toast.fire({
+        icon: "warning",
+        title: "Debes seleccionar cuenta de origen y destino",
+      });
+      return;
+    }
+
+    if (values.fromName === values.toName) {
+      Toast.fire({
+        icon: "warning",
+        title: "La cuenta de destino debe ser diferente",
+      });
+      return;
+    }
+
+    try {
+      const result = await saveTransfer({
+        amount: Math.abs(rawAmount),
+        date: values.date,
+        fromName: values.fromName,
+        toName: values.toName,
+      });
+
+      if (result.success) {
+        closeAllPanels();
+        Toast.fire({
+          icon: "success",
+          title: "Transferencia realizada con éxito",
+        });
+        router.refresh();
+      } else {
+        throw new Error(result.message || "Error al procesar la transferencia");
+      }
+    } catch (error) {
+      console.error("Error saving transfer:", error);
+      const msg =
+        error instanceof Error ? error.message : "Ocurrió un error inesperado";
+      Toast.fire({ icon: "error", title: msg });
+    }
   };
 
   const handleEditClick = (tx: Transaction) => {
@@ -533,7 +619,7 @@ export default function Dashboard({
     else if (tx.type === "income") setIsIncomePanelOpen(true);
   };
 
-  // --- NAVEGACIÓN Y FILTROS ---
+  // NAVEGACIÓN Y FILTROS
   const isCurrentWeek = useMemo(() => {
     const now = new Date();
     const currentDay = now.getDay();
@@ -541,11 +627,13 @@ export default function Dashboard({
     const realStart = new Date(now);
     realStart.setDate(now.getDate() - diff);
     realStart.setHours(0, 0, 0, 0);
+
     const viewDay = currentDate.getDay();
     const viewDiff = viewDay === 0 ? 6 : viewDay - 1;
     const viewStart = new Date(currentDate);
     viewStart.setDate(currentDate.getDate() - viewDiff);
     viewStart.setHours(0, 0, 0, 0);
+
     return viewStart.getTime() >= realStart.getTime();
   }, [currentDate]);
 
@@ -556,7 +644,6 @@ export default function Dashboard({
     setSelectedDay(null);
   };
 
-  // 1. Filtrar Semana
   const { currentWeekTransactions, weekRangeStr } = useMemo(() => {
     const now = new Date(currentDate);
     const currentDay = now.getDay();
@@ -582,7 +669,6 @@ export default function Dashboard({
     };
   }, [transactions, currentDate]);
 
-  // 2. Gráfica
   const chartData = useMemo(() => {
     const days = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
     const dataMap = days.map((day) => ({ name: day, income: 0, expense: 0 }));
@@ -593,11 +679,12 @@ export default function Dashboard({
         const d = new Date(t.date + "T12:00:00");
         const jsDay = d.getDay();
         dayIndex = jsDay === 0 ? 6 : jsDay - 1;
-      } else {
+      } else if (t.day) {
         const normalizedDay =
           t.day.charAt(0).toUpperCase() + t.day.slice(1).toLowerCase();
         dayIndex = days.indexOf(normalizedDay);
       }
+
       if (dayIndex >= 0 && dayIndex < 7) {
         if (t.type === "income") dataMap[dayIndex].income += t.amount;
         else if (t.status === "paid" || t.status === "received")
@@ -607,7 +694,6 @@ export default function Dashboard({
     return dataMap;
   }, [currentWeekTransactions]);
 
-  // 3. Lista Filtrada
   const filteredTransactions = useMemo(() => {
     let items = currentWeekTransactions;
     if (selectedDay) {
@@ -621,7 +707,6 @@ export default function Dashboard({
     return items;
   }, [selectedDay, currentWeekTransactions]);
 
-  // 4. Métricas
   const metrics = useMemo(() => {
     let income = 0;
     let expense = 0;
@@ -644,12 +729,13 @@ export default function Dashboard({
       style: "currency",
       currency: "MXN",
     }).format(val);
+
   const cardAccounts = accounts.filter(
     (a) => a.type !== "cash" && !a.name.toLowerCase().includes("efectivo")
   );
 
   return (
-    <div className="space-y-8 text-slate-200 relative min-h-screen">
+    <div className="space-y-8 text-slate-200 relative min-h-screen animate-in fade-in duration-500">
       {/* MODALES */}
       <DailyClosingPanel
         isOpen={isClosingPanelOpen}
@@ -695,7 +781,7 @@ export default function Dashboard({
       <AccountSelectorModal
         isOpen={isCardSelectorOpen}
         onClose={() => setIsCardSelectorOpen(false)}
-        onSelect={handleSelectCard}
+        onSelect={(acc) => processPayment(acc.name)}
         accounts={cardAccounts}
       />
 
@@ -704,32 +790,31 @@ export default function Dashboard({
         <div className="flex items-center gap-3 mb-1">
           <h1 className="text-2xl font-bold text-white">Resumen Financiero</h1>
         </div>
-
         <div className="flex flex-wrap gap-3">
-          <button
+          <ActionButton
             onClick={() => setIsExpensePanelOpen(true)}
-            className="bg-slate-800 hover:bg-slate-700 text-rose-400 border border-slate-700 hover:border-rose-500/50 px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all active:scale-95"
-          >
-            <MinusCircle size={20} /> Gasto
-          </button>
-          <button
+            icon={MinusCircle}
+            label="Gasto"
+            color="text-rose-400 border-rose-500/50"
+          />
+          <ActionButton
             onClick={() => setIsIncomePanelOpen(true)}
-            className="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 hover:border-emerald-500/50 px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all active:scale-95"
-          >
-            <PlusCircle size={20} /> Ingreso
-          </button>
-          <button
+            icon={PlusCircle}
+            label="Ingreso"
+            color="text-emerald-400 border-emerald-500/50"
+          />
+          <ActionButton
             onClick={() => setIsWithdrawalPanelOpen(true)}
-            className="bg-slate-800 hover:bg-slate-700 text-orange-400 border border-slate-700 hover:border-orange-500/50 px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all active:scale-95"
-          >
-            <ArrowDownCircle size={20} /> Retiro
-          </button>
-          <button
+            icon={ArrowDownCircle}
+            label="Retiro"
+            color="text-orange-400 border-orange-500/50"
+          />
+          <ActionButton
             onClick={() => setIsTransferPanelOpen(true)}
-            className="bg-slate-800 hover:bg-slate-700 text-indigo-400 border border-slate-700 hover:border-indigo-500/50 px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all active:scale-95"
-          >
-            <ArrowRightLeft size={20} /> Traspaso
-          </button>
+            icon={ArrowRightLeft}
+            label="Traspaso"
+            color="text-indigo-400 border-indigo-500/50"
+          />
           <button
             onClick={() => setIsClosingPanelOpen(true)}
             className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all shadow-lg shadow-emerald-900/20 active:scale-95"
@@ -800,26 +885,21 @@ export default function Dashboard({
               </div>
             )}
           </div>
-
           <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
             {filteredTransactions.length > 0 ? (
               filteredTransactions
                 .slice(0)
-                .sort((a, b) => {
-                  const dateA = new Date(a.date).getTime();
-                  const dateB = new Date(b.date).getTime();
-                  if (dateA !== dateB) return dateA - dateB;
-                  const timeA = new Date(a.createdAt || a.date).getTime();
-                  const timeB = new Date(b.createdAt || b.date).getTime();
-                  return timeA - timeB;
-                })
-                .reverse()
+                .sort(
+                  (a, b) =>
+                    new Date(b.date).getTime() - new Date(a.date).getTime()
+                )
                 .map((tx) => (
                   <TransactionItem
                     key={tx.id}
                     {...tx}
                     onDoubleClick={() => {
                       if (tx.status === "pending") setPaymentTx(tx);
+                      else handleEditClick(tx);
                     }}
                   />
                 ))
@@ -844,14 +924,39 @@ export default function Dashboard({
   );
 }
 
-// SUBCOMPONENTES CARD Y TRANSACTIONITEM (Iguales que antes)
-interface CardProps {
+// COMPONENTES AUXILIARES
+const ActionButton = ({
+  onClick,
+  icon: Icon,
+  label,
+  color,
+}: {
+  onClick: () => void;
+  icon: LucideIcon;
+  label: string;
+  color: string;
+}) => (
+  <button
+    onClick={onClick}
+    className={`bg-slate-800 hover:bg-slate-700 border border-slate-700 px-5 py-2.5 rounded-lg flex items-center gap-2 font-medium transition-all active:scale-95 ${
+      color.split(" ")[0]
+    } hover:${color.split(" ")[1]}`}
+  >
+    <Icon size={20} /> {label}
+  </button>
+);
+
+function Card({
+  title,
+  amount,
+  icon: Icon,
+  highlight,
+}: {
   title: string;
   amount: string;
   icon: LucideIcon;
   highlight?: boolean;
-}
-function Card({ title, amount, icon: Icon, highlight }: CardProps) {
+}) {
   return (
     <div
       className={`p-6 rounded-xl border transition-all duration-300 ${
@@ -889,9 +994,6 @@ function Card({ title, amount, icon: Icon, highlight }: CardProps) {
   );
 }
 
-interface TransactionItemProps extends Transaction {
-  onDoubleClick?: () => void;
-}
 function TransactionItem({
   name,
   date,
@@ -899,45 +1001,47 @@ function TransactionItem({
   type,
   status,
   onDoubleClick,
-}: TransactionItemProps) {
+}: Transaction & { onDoubleClick?: () => void }) {
   const isIncome = type === "income";
   const isTransfer = type === "transfer";
   const formattedAmount = new Intl.NumberFormat("es-MX", {
     style: "currency",
     currency: "MXN",
   }).format(Math.abs(amount));
-  const displayAmount = isTransfer
-    ? `${formattedAmount}`
-    : isIncome
-    ? `+${formattedAmount}`
-    : `-${formattedAmount}`;
 
-  let iconStyles = "",
-    amountClass = "",
-    bgGradient = "";
-  if (isTransfer) {
-    iconStyles = "text-indigo-400 bg-indigo-500/10 border-indigo-500/20";
-    amountClass = "text-indigo-300";
-    bgGradient = "hover:from-indigo-500/5";
-  } else if (isIncome) {
-    iconStyles = "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
-    amountClass = "text-emerald-400";
-    bgGradient = "hover:from-emerald-500/5";
-  } else {
-    iconStyles = "text-rose-400 bg-rose-500/10 border-rose-500/20";
-    amountClass = "text-white";
-    bgGradient = "hover:from-rose-500/5";
-  }
+  let styles = { icon: "", text: "", bg: "" };
+  if (isTransfer)
+    styles = {
+      icon: "text-indigo-400 bg-indigo-500/10 border-indigo-500/20",
+      text: "text-indigo-300",
+      bg: "hover:from-indigo-500/5",
+    };
+  else if (isIncome)
+    styles = {
+      icon: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+      text: "text-emerald-400",
+      bg: "hover:from-emerald-500/5",
+    };
+  else
+    styles = {
+      icon: "text-rose-400 bg-rose-500/10 border-rose-500/20",
+      text: "text-white",
+      bg: "hover:from-rose-500/5",
+    };
 
   return (
     <div
       onDoubleClick={onDoubleClick}
-      className={`group relative flex justify-between items-center p-4 mb-3 rounded-2xl border border-slate-800/50 bg-slate-900/40 hover:border-slate-700/50 transition-all duration-300 cursor-pointer overflow-hidden select-none bg-gradient-to-r via-transparent to-transparent ${bgGradient}`}
-      title={status === "pending" ? "Doble clic para pagar" : ""}
+      className={`group relative flex justify-between items-center p-4 mb-3 rounded-2xl border border-slate-800/50 bg-slate-900/40 hover:border-slate-700/50 transition-all duration-300 cursor-pointer overflow-hidden select-none bg-linear-to-r via-transparent to-transparent ${styles.bg}`}
+      title={
+        status === "pending"
+          ? "Doble clic para pagar"
+          : "Doble clic para editar"
+      }
     >
       <div className="flex items-center gap-4 overflow-hidden">
         <div
-          className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold border shrink-0 ${iconStyles}`}
+          className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold border shrink-0 ${styles.icon}`}
         >
           {isTransfer ? (
             <ArrowRightLeft size={20} />
@@ -953,8 +1057,12 @@ function TransactionItem({
         </div>
       </div>
       <div className="text-right shrink-0 pl-4">
-        <span className={`font-bold text-base block ${amountClass}`}>
-          {displayAmount}
+        <span className={`font-bold text-base block ${styles.text}`}>
+          {isTransfer
+            ? formattedAmount
+            : isIncome
+            ? `+${formattedAmount}`
+            : `-${formattedAmount}`}
         </span>
         {status === "pending" && (
           <span className="text-[10px] text-amber-400 font-bold mt-1 block">

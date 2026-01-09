@@ -1,23 +1,26 @@
-// src/lib/dynamodb.ts
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 
-// 1. Configuración usando tus variables de entorno
-const config = {
-  region: process.env.AWS_REGION,
+const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+const region = process.env.AWS_REGION || "us-east-1";
+
+if (!accessKeyId || !secretAccessKey) {
+  throw new Error(
+    "FATAL ERROR: Faltan las credenciales de AWS (AWS_ACCESS_KEY_ID o AWS_SECRET_ACCESS_KEY) en las variables de entorno."
+  );
+}
+const client = new DynamoDBClient({
+  region,
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID as string,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY as string,
+    accessKeyId,
+    secretAccessKey,
   },
-};
+});
 
-// 2. Cliente base (bajo nivel)
-const client = new DynamoDBClient(config);
-
-// 3. Cliente Document (alto nivel)
-// Este es el "traductor" que nos permite usar objetos JSON normales de JavaScript
 export const db = DynamoDBDocumentClient.from(client, {
   marshallOptions: {
-    removeUndefinedValues: true, // Limpia campos undefined automáticamente
+    removeUndefinedValues: true,
+    convertEmptyValues: true,
   },
 });
