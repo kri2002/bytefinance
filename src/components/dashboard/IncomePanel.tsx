@@ -4,14 +4,24 @@ import { useState, useEffect, useMemo } from "react";
 import {
   X,
   Save,
-  DollarSign,
+  TrendingUp,
   Calendar,
   Tag,
   FileText,
   Wallet,
-  TrendingUp,
 } from "lucide-react";
 
+// 1. Interfaces necesarias
+interface Transaction {
+  id: string | number;
+  name: string;
+  date: string;
+  amount: number;
+  type: string;
+  status: string;
+  category?: string;
+  method?: string;
+}
 interface Category {
   id: string;
   name: string;
@@ -22,20 +32,28 @@ interface Account {
   id: string;
   name: string;
   color: string;
+  type: string;
+  balance: number;
 }
 
 interface IncomePanelProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (data: {
-    name: string;
-    amount: string;
-    date: string;
-    category?: string;
-    accountName?: string;
-  }) => void;
+  // 2. Actualizar onSave para soporte de edición
+  onSave: (
+    data: {
+      name: string;
+      amount: string;
+      date: string;
+      category?: string;
+      accountName?: string;
+    },
+    isEdit?: boolean
+  ) => void;
   categories: Category[];
   accounts: Account[];
+  // 3. Nueva prop editData
+  editData?: Transaction | null;
 }
 
 export default function IncomePanel({
@@ -44,11 +62,16 @@ export default function IncomePanel({
   onSave,
   categories,
   accounts,
+  editData,
 }: IncomePanelProps) {
-  // Filtramos categorías de INGRESO
   const incomeCategories = useMemo(
     () => categories.filter((c) => c.type === "income"),
     [categories]
+  );
+  // Para ingresos, mostramos todas las cuentas (excepto crédito, aunque podrías recibir un reembolso ahí)
+  const availableAccounts = useMemo(
+    () => accounts.filter((a) => a.type !== "credit"),
+    [accounts]
   );
 
   const getLocalToday = () => new Date().toLocaleDateString("en-CA");
@@ -61,30 +84,62 @@ export default function IncomePanel({
     accountId: "",
   });
 
+  // 4. useEffect para MODO EDICIÓN
   useEffect(() => {
     if (isOpen) {
-      setFormData((prev) => ({
-        name: "",
-        amount: "",
-        date: getLocalToday(),
-        categoryId:
-          prev.categoryId ||
-          (incomeCategories.length > 0 ? incomeCategories[0].id : ""),
-        accountId:
-          prev.accountId || (accounts.length > 0 ? accounts[0].id : ""),
-      }));
+      if (editData) {
+        // --- PRE-LLENAR ---
+        const editCat =
+          categories.find((c) => c.name === editData.category)?.id || "";
+        const editAcc =
+          accounts.find((a) => a.name === editData.method)?.id ||
+          (availableAccounts.length > 0 ? availableAccounts[0].id : "");
+
+        setFormData({
+          name: editData.name,
+          amount: editData.amount.toString(), // Los ingresos ya son positivos
+          date: editData.date,
+          categoryId: editCat,
+          accountId: editAcc,
+        });
+      } else {
+        // --- RESET ---
+        setFormData((prev) => ({
+          name: "",
+          amount: "",
+          date: getLocalToday(),
+          categoryId:
+            prev.categoryId ||
+            (incomeCategories.length > 0 ? incomeCategories[0].id : ""),
+          accountId:
+            prev.accountId ||
+            (availableAccounts.length > 0 ? availableAccounts[0].id : ""),
+        }));
+      }
     }
-  }, [isOpen]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editData]);
 
   useEffect(() => {
-    if (isOpen && !formData.categoryId && incomeCategories.length > 0)
+    if (
+      isOpen &&
+      !editData &&
+      !formData.categoryId &&
+      incomeCategories.length > 0
+    )
       setFormData((prev) => ({ ...prev, categoryId: incomeCategories[0].id }));
-    if (isOpen && !formData.accountId && accounts.length > 0)
-      setFormData((prev) => ({ ...prev, accountId: accounts[0].id }));
+    if (
+      isOpen &&
+      !editData &&
+      availableAccounts.length > 0 &&
+      !formData.accountId
+    )
+      setFormData((prev) => ({ ...prev, accountId: availableAccounts[0].id }));
   }, [
     isOpen,
+    editData,
     incomeCategories,
-    accounts,
+    availableAccounts,
     formData.categoryId,
     formData.accountId,
   ]);
@@ -94,11 +149,15 @@ export default function IncomePanel({
     const selectedCat = categories.find((c) => c.id === formData.categoryId);
     const selectedAcc = accounts.find((a) => a.id === formData.accountId);
 
-    onSave({
-      ...formData,
-      category: selectedCat ? selectedCat.name : undefined,
-      accountName: selectedAcc ? selectedAcc.name : undefined,
-    });
+    // 5. Pasar bandera isEdit
+    onSave(
+      {
+        ...formData,
+        category: selectedCat ? selectedCat.name : undefined,
+        accountName: selectedAcc ? selectedAcc.name : undefined,
+      },
+      !!editData
+    );
   };
 
   return (
@@ -123,7 +182,8 @@ export default function IncomePanel({
               <div className="bg-emerald-500/20 p-2 rounded-lg">
                 <TrendingUp className="text-emerald-500" size={20} />
               </div>
-              Registrar Ingreso Extra
+              {/* 6. Título dinámico */}
+              {editData ? "Editar Ingreso" : "Registrar Ingreso"}
             </h2>
             <button
               onClick={onClose}
@@ -140,7 +200,7 @@ export default function IncomePanel({
             {/* Monto */}
             <div className="space-y-2">
               <label className="text-sm font-medium text-emerald-400">
-                Monto Recibido
+                Monto del Ingreso
               </label>
               <div className="relative">
                 <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 text-xl font-bold">
@@ -150,6 +210,7 @@ export default function IncomePanel({
                   required
                   type="number"
                   placeholder="0.00"
+                  step="0.01"
                   className="w-full bg-slate-900 border border-slate-700 rounded-2xl pl-10 pr-4 py-4 text-3xl font-bold text-white placeholder:text-slate-600 focus:border-emerald-500 outline-none transition-all"
                   value={formData.amount}
                   onChange={(e) =>
@@ -167,7 +228,7 @@ export default function IncomePanel({
               <input
                 required
                 type="text"
-                placeholder="Ej. Venta de Llantas, Freelance..."
+                placeholder="Ej. Nómina, Venta..."
                 className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none"
                 value={formData.name}
                 onChange={(e) =>
@@ -176,13 +237,13 @@ export default function IncomePanel({
               />
             </div>
 
-            {/* Selector de CUENTA DESTINO */}
+            {/* Selector de CUENTA DE DESTINO */}
             <div className="space-y-3">
               <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
                 <Wallet size={16} /> Depositar en
               </label>
               <div className="grid grid-cols-2 gap-3">
-                {accounts.map((acc) => (
+                {availableAccounts.map((acc) => (
                   <button
                     key={acc.id}
                     type="button"
@@ -260,7 +321,6 @@ export default function IncomePanel({
               <input
                 required
                 type="date"
-                max={getLocalToday()}
                 className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none [color-scheme:dark]"
                 value={formData.date}
                 onChange={(e) =>
@@ -275,7 +335,9 @@ export default function IncomePanel({
               onClick={handleSubmit}
               className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-2 transition-all hover:scale-[1.02] shadow-lg shadow-emerald-900/20"
             >
-              <Save size={20} /> Guardar Ingreso
+              {/* 7. Texto dinámico */}
+              <Save size={20} />{" "}
+              {editData ? "Guardar Cambios" : "Registrar Ingreso"}
             </button>
           </div>
         </div>

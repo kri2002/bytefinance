@@ -1,13 +1,20 @@
 import Dashboard from '@/components/dashboard/Dashboard';
-import { getTransactions, getRecurringPayments, getCategories, getAccounts } from '@/lib/actions';
+import { 
+  getTransactions, 
+  getRecurringPayments, 
+  getCategories, 
+  getAccounts, 
+  getDebts // 1. Ya lo tienes importado aquí, ¡bien!
+} from '@/lib/actions';
 
 export default async function DashboardPage() {
-  // Cargamos TODO: Transacciones, Recurrentes, Categorías y Cuentas
-  const [transactions, recurring, categories, accounts] = await Promise.all([
+  // 2. Agregamos 'debts' al destructuring y 'getDebts()' al Promise.all
+  const [transactions, recurring, categories, accounts, debts] = await Promise.all([
     getTransactions(),
     getRecurringPayments(),
     getCategories(),
-    getAccounts()
+    getAccounts(),
+    getDebts() // <--- AQUI HACEMOS LA PETICIÓN
   ]);
 
   return (
@@ -18,6 +25,7 @@ export default async function DashboardPage() {
             recurringConfig={recurring as any}
             categories={categories as any}
             accounts={accounts as any}
+            debts={debts as any} // 3. SE LO PASAMOS AL COMPONENTE
         />
       </div>
     </main>

@@ -1,15 +1,11 @@
-import RecurringPage from '@/components/recurring/RecurringPage'; 
-import { getRecurringPayments } from '@/lib/actions';
+// src/app/recurring/page.tsx
+import { getRecurringPayments, getAccounts } from '@/lib/actions';
+import RecurringPage from '@/components/recurring/RecurringPage';
 
 export default async function Page() {
-  const recurringData = await getRecurringPayments();
+    const data = await getRecurringPayments();
+    const accounts = await getAccounts();
 
-  return (
-    <main className="p-4 md:p-8 min-h-screen">
-      <div className="max-w-5xl mx-auto">
-        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-        <RecurringPage initialData={recurringData as any} />
-      </div>
-    </main>
-  );
+    // Pasamos 'accounts' al componente
+    return <RecurringPage initialData={data} accounts={accounts} />;
 }

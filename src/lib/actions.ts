@@ -9,8 +9,17 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { revalidatePath } from "next/cache";
 
-const MOCK_USER_ID = "USER#dev@bytefinance.com";
-const TABLE_NAME = "ByteFinanceApp";
+import { getAuthenticatedUser } from "@/utils/amplify-server-utils";
+
+const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "ByteFinanceApp";
+
+async function getUserPK() {
+  const user = await getAuthenticatedUser();
+  if (!user || !user.id) {
+    throw new Error("Unauthorized: Usuario no autenticado.");
+  }
+  return `USER#${user.id}`;
+}
 
 // --- TRANSACCIONES (Historial) ---
 
@@ -25,11 +34,12 @@ export async function saveTransaction(transactionData: {
   category?: string;
 }) {
   try {
+    const PK = await getUserPK();
     const timestamp = new Date().toISOString();
     const uniqueId = transactionData.id || crypto.randomUUID();
 
     const item = {
-      PK: MOCK_USER_ID,
+      PK: PK,
       SK: `TX#${transactionData.date}#${uniqueId}`,
       id: uniqueId,
       createdAt: timestamp,
@@ -47,11 +57,12 @@ export async function saveTransaction(transactionData: {
 
 export async function getTransactions() {
   try {
+    const PK = await getUserPK();
     const result = await db.send(
       new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
-        ExpressionAttributeValues: { ":pk": MOCK_USER_ID, ":sk": "TX#" },
+        ExpressionAttributeValues: { ":pk": PK, ":sk": "TX#" },
       })
     );
 
@@ -69,11 +80,141 @@ export async function getTransactions() {
       day: new Date(item.date + "T12:00:00")
         .toLocaleDateString("es-MX", { weekday: "short" })
         .replace(".", ""),
+      createdAt: item.createdAt || item.date,
       source: "manual",
     }));
   } catch (error) {
     console.error("Error getting transactions:", error);
     return [];
+  }
+}
+
+export async function deleteTransaction(id: string) {
+  try {
+    return {
+      success: false,
+      message: "Use deleteTransactionWithReversal instead",
+    };
+  } catch (error) {
+    return { success: false };
+  }
+}
+
+export async function deleteTransactionWithReversal(tx: {
+  id: string;
+  date: string;
+  amount: number;
+  type: string;
+  method?: string;
+  name?: string;
+}) {
+  try {
+    const PK = await getUserPK();
+    const { id, date, amount, type, method, name } = tx;
+
+    if (method) {
+      if (type === "expense") {
+        await updateAccountBalance(method, Math.abs(amount));
+      } else if (type === "income") {
+        await updateAccountBalance(method, -Math.abs(amount));
+      } else if (type === "transfer") {
+        await updateAccountBalance(method, Math.abs(amount));
+
+        if (name && name.startsWith("Traspaso a ")) {
+          const toAccountName = name.replace("Traspaso a ", "");
+          await updateAccountBalance(toAccountName, -Math.abs(amount));
+        }
+      }
+    }
+
+    const sk = `TX#${date}#${id}`;
+
+    await db.send(
+      new DeleteCommand({
+        TableName: TABLE_NAME,
+        Key: { PK: PK, SK: sk },
+      })
+    );
+
+    revalidatePath("/");
+    return { success: true };
+  } catch (error) {
+    console.error("Error deleting transaction:", error);
+    return { success: false };
+  }
+}
+
+export async function editTransactionWithReversal(
+  originalTx: {
+    id: string;
+    date: string;
+    amount: number;
+    type: string;
+    method?: string;
+  },
+  newValues: {
+    name: string;
+    amount: number;
+    date: string;
+    category?: string;
+    accountName?: string;
+    status?: string;
+  }
+) {
+  try {
+    const PK = await getUserPK(); // 👈 ID REAL
+
+    // 1. REVERTIR SALDO ORIGINAL
+    if (originalTx.method && originalTx.type !== "transfer") {
+      await updateAccountBalance(originalTx.method, -originalTx.amount);
+    }
+
+    // 2. PREPARAR NUEVO MONTO Y ESTADO
+    let finalNewAmount = Math.abs(newValues.amount);
+    if (originalTx.type === "expense") {
+      finalNewAmount = -finalNewAmount;
+    }
+    const newStatus =
+      newValues.status || (originalTx.type === "income" ? "received" : "paid");
+
+    // 3. ACTUALIZAR EL REGISTRO EN DYNAMODB
+    const sk = `TX#${originalTx.date}#${originalTx.id}`;
+
+    await db.send(
+      new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: { PK: PK, SK: sk },
+        UpdateExpression:
+          "set #n = :n, amount = :a, #d = :d, category = :c, #m = :m, #s = :s",
+        ExpressionAttributeNames: {
+          "#n": "name",
+          "#d": "date",
+          "#m": "method",
+          "#s": "status",
+        },
+        ExpressionAttributeValues: {
+          ":n": newValues.name,
+          ":a": finalNewAmount,
+          ":d": newValues.date,
+          ":c": newValues.category || null,
+          ":m": newValues.accountName || "General",
+          ":s": newStatus,
+        },
+      })
+    );
+
+    // 4. APLICAR NUEVO SALDO
+    if (newValues.accountName && originalTx.type !== "transfer") {
+      if (newStatus === "paid" || newStatus === "received") {
+        await updateAccountBalance(newValues.accountName, finalNewAmount);
+      }
+    }
+
+    revalidatePath("/");
+    return { success: true };
+  } catch (error) {
+    console.error("Error editing transaction:", error);
+    return { success: false, error };
   }
 }
 
@@ -87,13 +228,14 @@ export async function saveRecurringPayment(data: {
   frequency: string;
 }) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const id = data.id || crypto.randomUUID();
 
     await db.send(
       new PutCommand({
         TableName: TABLE_NAME,
         Item: {
-          PK: MOCK_USER_ID,
+          PK: PK,
           SK: `REC#${id}`,
           id: id,
           name: data.name,
@@ -115,11 +257,12 @@ export async function saveRecurringPayment(data: {
 
 export async function getRecurringPayments() {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const result = await db.send(
       new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
-        ExpressionAttributeValues: { ":pk": MOCK_USER_ID, ":sk": "REC#" },
+        ExpressionAttributeValues: { ":pk": PK, ":sk": "REC#" },
       })
     );
 
@@ -140,11 +283,12 @@ export async function getRecurringPayments() {
 
 export async function deleteRecurringPayment(id: string) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     await db.send(
       new DeleteCommand({
         TableName: TABLE_NAME,
         Key: {
-          PK: MOCK_USER_ID,
+          PK: PK,
           SK: `REC#${id}`,
         },
       })
@@ -161,6 +305,7 @@ export async function deleteRecurringPayment(id: string) {
 /* TRANSACCIONES (/transactions) */
 export async function getTransactionsByMonth(year: number, month: number) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const monthStr = month.toString().padStart(2, "0");
     const prefix = `TX#${year}-${monthStr}`;
 
@@ -169,7 +314,7 @@ export async function getTransactionsByMonth(year: number, month: number) {
         TableName: TABLE_NAME,
         KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
         ExpressionAttributeValues: {
-          ":pk": MOCK_USER_ID,
+          ":pk": PK,
           ":sk": prefix,
         },
       })
@@ -177,7 +322,6 @@ export async function getTransactionsByMonth(year: number, month: number) {
 
     if (!result.Items) return [];
 
-    // Mapeamos igual que siempre
     return result.Items.map((item) => ({
       id: item.id,
       name: item.name,
@@ -190,6 +334,7 @@ export async function getTransactionsByMonth(year: number, month: number) {
       day: new Date(item.date + "T12:00:00")
         .toLocaleDateString("es-MX", { weekday: "short" })
         .replace(".", ""),
+      createdAt: item.createdAt || item.date,
       source: "manual",
     })).reverse();
   } catch (error) {
@@ -209,13 +354,14 @@ export async function saveAccount(data: {
   color: string;
 }) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const id = data.id || crypto.randomUUID();
 
     await db.send(
       new PutCommand({
         TableName: TABLE_NAME,
         Item: {
-          PK: MOCK_USER_ID,
+          PK: PK,
           SK: `ACC#${id}`,
           id: id,
           name: data.name,
@@ -238,16 +384,18 @@ export async function saveAccount(data: {
 
 export async function getAccounts() {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const result = await db.send(
       new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
-        ExpressionAttributeValues: { ":pk": MOCK_USER_ID, ":sk": "ACC#" },
+        ExpressionAttributeValues: { ":pk": PK, ":sk": "ACC#" },
       })
     );
 
+    // SEEDING: Si el usuario es nuevo y no tiene cuentas, creamos las default
     if (!result.Items || result.Items.length === 0) {
-      console.log("No accounts found. Seeding defaults...");
+      console.log("No accounts found for user. Seeding defaults...");
       const defaults = [
         {
           name: "Didi Card",
@@ -273,9 +421,10 @@ export async function getAccounts() {
       ];
 
       for (const acc of defaults) {
-        await saveAccount(acc);
+        await saveAccount(acc); // Esto usará getUserPK internamente
       }
 
+      // Volvemos a llamar para obtener las recién creadas
       return getAccounts();
     }
 
@@ -296,11 +445,12 @@ export async function getAccounts() {
 
 export async function deleteAccount(id: string) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     await db.send(
       new DeleteCommand({
         TableName: TABLE_NAME,
         Key: {
-          PK: MOCK_USER_ID,
+          PK: PK,
           SK: `ACC#${id}`,
         },
       })
@@ -318,6 +468,7 @@ export async function updateAccountBalance(
   amount: number
 ) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const accounts = await getAccounts();
 
     const targetAccount = accounts.find(
@@ -335,7 +486,7 @@ export async function updateAccountBalance(
       new UpdateCommand({
         TableName: TABLE_NAME,
         Key: {
-          PK: MOCK_USER_ID,
+          PK: PK,
           SK: `ACC#${targetAccount.id}`,
         },
         UpdateExpression: "set balance = balance + :val, updatedAt = :date",
@@ -363,13 +514,14 @@ export async function saveCategory(data: {
   type: "expense" | "income";
 }) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const id = data.id || crypto.randomUUID();
 
     await db.send(
       new PutCommand({
         TableName: TABLE_NAME,
         Item: {
-          PK: MOCK_USER_ID,
+          PK: PK,
           SK: `CAT#${id}`,
           id: id,
           name: data.name,
@@ -389,11 +541,12 @@ export async function saveCategory(data: {
 
 export async function getCategories() {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const result = await db.send(
       new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
-        ExpressionAttributeValues: { ":pk": MOCK_USER_ID, ":sk": "CAT#" },
+        ExpressionAttributeValues: { ":pk": PK, ":sk": "CAT#" },
       })
     );
 
@@ -428,10 +581,11 @@ export async function getCategories() {
 
 export async function deleteCategory(id: string) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     await db.send(
       new DeleteCommand({
         TableName: TABLE_NAME,
-        Key: { PK: MOCK_USER_ID, SK: `CAT#${id}` },
+        Key: { PK: PK, SK: `CAT#${id}` },
       })
     );
     revalidatePath("/categories");
@@ -442,39 +596,261 @@ export async function deleteCategory(id: string) {
   }
 }
 
-
 /* traspasos */
-export async function saveTransfer(data: { amount: number; date: string; fromName: string; toName: string }) {
+export async function saveTransfer(data: {
+  amount: number;
+  date: string;
+  fromName: string;
+  toName: string;
+}) {
   try {
+    const PK = await getUserPK(); // 👈 ID REAL
     const { amount, date, fromName, toName } = data;
 
     await updateAccountBalance(fromName, -amount);
 
     await updateAccountBalance(toName, amount);
-    
-    const id = crypto.randomUUID();
-    await db.send(new PutCommand({
-      TableName: TABLE_NAME,
-      Item: {
-        PK: MOCK_USER_ID,
-        SK: `TX#${date}#${id}`,
-        id: id,
-        name: `Traspaso a ${toName}`,
-        amount: -amount,
-        type: 'transfer',
-        date: date,
-        status: 'paid',
-        method: fromName,
-        category: 'Traspaso',
-        createdAt: new Date().toISOString()
-      },
-    }));
 
-    revalidatePath('/');
-    revalidatePath('/accounts');
+    const id = crypto.randomUUID();
+    await db.send(
+      new PutCommand({
+        TableName: TABLE_NAME,
+        Item: {
+          PK: PK,
+          SK: `TX#${date}#${id}`,
+          id: id,
+          name: `Traspaso a ${toName}`,
+          amount: -amount,
+          type: "transfer",
+          date: date,
+          status: "paid",
+          method: fromName,
+          category: "Traspaso",
+          createdAt: new Date().toISOString(),
+        },
+      })
+    );
+
+    revalidatePath("/");
+    revalidatePath("/accounts");
     return { success: true };
   } catch (error) {
     console.error("Error saving transfer:", error);
+    return { success: false };
+  }
+}
+
+// --- PERFIL DE USUARIO Y CONFIGURACIÓN (SK: PROFILE) ---
+
+export async function getUserSettings() {
+  try {
+    const PK = await getUserPK();
+    const result = await db.send(
+      new QueryCommand({
+        TableName: TABLE_NAME,
+        KeyConditionExpression: "PK = :pk AND SK = :sk",
+        ExpressionAttributeValues: { ":pk": PK, ":sk": "PROFILE" },
+      })
+    );
+
+    return result.Items && result.Items.length > 0 ? result.Items[0] : null;
+  } catch (error) {
+    console.error("Error getting settings:", error);
+    return null;
+  }
+}
+
+export async function updateUserSettings(data: { 
+  name: string;
+  email: string;
+  currency: string;
+  budgetLimit: string;
+  notifications: boolean;
+}) {
+  try {
+    const PK = await getUserPK();
+    
+    await db.send(
+      new PutCommand({
+        TableName: TABLE_NAME,
+        Item: {
+          PK: PK,
+          SK: "PROFILE",
+          updatedAt: new Date().toISOString(),
+          ...data,
+        },
+      })
+    );
+    
+    revalidatePath("/settings");
+    return { success: true };
+  } catch (error) {
+    console.error("Error updating settings:", error);
+    return { success: false };
+  }
+}
+
+// --- EXPORTAR DATOS (Backup) ---
+export async function getFullUserDataForExport() {
+  try {
+    const transactions = await getTransactions();
+    const accounts = await getAccounts();
+    const categories = await getCategories();
+    const recurring = await getRecurringPayments();
+    const profile = await getUserSettings();
+
+    return {
+      profile,
+      accounts,
+      categories,
+      transactions,
+      recurring,
+      exportedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error("Error exporting data:", error);
+    return null;
+  }
+}
+
+// --- DEUDAS (DEBTS) ---
+
+export async function saveDebt(data: {
+  id?: string;
+  name: string;
+  totalAmount: number;
+  currentBalance?: number;
+  minimumPayment?: number;
+  nextPaymentDate: string; 
+  paymentFrequency: 'weekly' | 'biweekly' | 'monthly'; 
+  
+  totalInstallments?: number;
+  installmentsPaid?: number;
+}) {
+  try {
+    const PK = await getUserPK();
+    const id = data.id || crypto.randomUUID();
+    const currentBalance = data.currentBalance !== undefined ? data.currentBalance : data.totalAmount;
+
+    await db.send(
+      new PutCommand({
+        TableName: TABLE_NAME,
+        Item: {
+          PK: PK,
+          SK: `DEBT#${id}`,
+          id: id,
+          updatedAt: new Date().toISOString(),
+          ...data,
+          currentBalance, 
+          installmentsPaid: data.installmentsPaid || 0,
+          minimumPayment: data.minimumPayment || 0
+        },
+      })
+    );
+    revalidatePath("/debts");
+    return { success: true };
+  } catch (error) {
+    console.error("Error saving debt:", error);
+    return { success: false };
+  }
+}
+
+export async function getDebts() {
+  try {
+    const PK = await getUserPK();
+    const result = await db.send(
+      new QueryCommand({
+        TableName: TABLE_NAME,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": PK, ":sk": "DEBT#" },
+      })
+    );
+    return result.Items || [];
+  } catch (error) {
+    console.error("Error getting debts:", error);
+    return [];
+  }
+}
+
+export async function deleteDebt(id: string) {
+  try {
+    const PK = await getUserPK();
+    await db.send(new DeleteCommand({ TableName: TABLE_NAME, Key: { PK, SK: `DEBT#${id}` } }));
+    revalidatePath("/debts");
+    return { success: true };
+  } catch (error) {
+    return { success: false };
+  }
+}
+
+// ESTA ES LA FUNCIÓN CLAVE: Registra el pago y baja la deuda
+export async function registerDebtPayment(
+  debtId: string, 
+  paymentData: { 
+    amount: number; 
+    date: string; 
+    accountName: string; 
+    debtName: string;
+    isInstallment: boolean; 
+  }
+) {
+  try {
+    const PK = await getUserPK();
+    
+    // 1. Obtener la deuda actual
+    const debts = await getDebts();
+    const debt = debts.find(d => d.id === debtId);
+    if (!debt) throw new Error("Deuda no encontrada");
+
+    // 2. Calcular nuevos valores (Saldo y Pagos Hechos)
+    const newBalance = Math.max(0, debt.currentBalance - paymentData.amount);
+    const newInstallmentsPaid = paymentData.isInstallment ? (debt.installmentsPaid || 0) + 1 : (debt.installmentsPaid || 0);
+
+    // 3. CALCULAR NUEVA FECHA (¡ESTO FALTABA!) 📅
+    // Solo actualizamos la fecha si es un pago de cuota oficial (isInstallment)
+    // O si prefieres que SIEMPRE se mueva la fecha al pagar, quita el "if (paymentData.isInstallment)"
+    let newNextDate = debt.nextPaymentDate; 
+    
+    if (paymentData.isInstallment || newBalance > 0) { 
+        const current = new Date(debt.nextPaymentDate + "T12:00:00");
+        const next = new Date(current);
+        const freq = debt.paymentFrequency || 'monthly';
+
+        if (freq === 'weekly') next.setDate(current.getDate() + 7);
+        else if (freq === 'biweekly') next.setDate(current.getDate() + 15);
+        else if (freq === 'monthly') next.setMonth(current.getMonth() + 1); // Mensual
+        
+        newNextDate = next.toLocaleDateString('en-CA');
+    }
+
+    // 4. Registrar la Transacción (Gasto)
+    await saveTransaction({
+        name: `Pago: ${paymentData.debtName}`,
+        amount: -Math.abs(paymentData.amount),
+        type: 'expense',
+        date: paymentData.date,
+        status: 'paid',
+        method: paymentData.accountName,
+        category: 'Deudas'
+    });
+
+    // 5. Descontar dinero de la Cuenta
+    await updateAccountBalance(paymentData.accountName, -Math.abs(paymentData.amount));
+
+    // 6. Actualizar la Deuda (Saldo + Pagos + FECHA)
+    await saveDebt({
+        ...debt,
+        currentBalance: newBalance,
+        installmentsPaid: newInstallmentsPaid,
+        nextPaymentDate: newNextDate // <--- Aquí guardamos la nueva fecha
+    });
+
+    revalidatePath("/debts");
+    revalidatePath("/");
+    return { success: true };
+
+  } catch (error) {
+    console.error("Error paying debt:", error);
     return { success: false };
   }
 }

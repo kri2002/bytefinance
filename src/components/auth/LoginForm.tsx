@@ -3,31 +3,58 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Mail, Lock, ArrowRight, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Mail, Lock, ArrowRight, Eye, EyeOff, Loader2, AlertCircle } from 'lucide-react';
+// 1. IMPORTAR SIGNIN DE AWS
+import { signIn } from 'aws-amplify/auth';
 
 export default function LoginForm() {
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  // 2. ESTADO PARA ERRORES
+  const [error, setError] = useState<string | null>(null);
   
   const [formData, setFormData] = useState({ email: '', password: '' });
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-    setTimeout(() => {
+    setError(null);
+
+    try {
+        // 3. LÓGICA DE INICIO DE SESIÓN
+        const { isSignedIn, nextStep } = await signIn({
+            username: formData.email, // En Cognito el 'username' es el email
+            password: formData.password
+        });
+
+        if (isSignedIn) {
+            // Éxito: El LayoutWrapper detectará el cambio de sesión automáticamente.
+            // Redirigimos al home por seguridad.
+            router.push('/');
+        } else {
+            // Casos especiales (ej: si Cognito pidiera cambiar password obligatoriamente)
+            console.log("Login incompleto, paso siguiente:", nextStep);
+            setIsLoading(false);
+        }
+    } catch (err: any) {
+        console.error('Error login:', err);
+        // 4. MANEJO DE ERRORES DE USUARIO
+        if (err.name === 'NotAuthorizedException') {
+            setError('Correo o contraseña incorrectos.');
+        } else if (err.name === 'UserNotFoundException') {
+            setError('No existe una cuenta con este correo.');
+        } else {
+            setError('Ocurrió un error inesperado. Intenta más tarde.');
+        }
         setIsLoading(false);
-        router.push('/');
-    }, 1500);
+    }
   };
 
   return (
-    // Quitamos "min-h-screen" de aquí porque ya lo tiene el LayoutWrapper
-    // Usamos w-full para asegurar que se centre bien
     <div className="w-full flex items-center justify-center p-4">
       
-      {/* FONDO DECORATIVO MEJORADO (Sin cortes) */}
-      {/* Este div se posiciona fijo respecto a la ventana, creando un brillo azul arriba */}
+      {/* FONDO DECORATIVO */}
       <div className="fixed inset-0 z-0 pointer-events-none bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-blue-900/40 via-slate-950 to-slate-950"></div>
 
       <div className="bg-slate-900/80 border border-slate-800 w-full max-w-md p-8 rounded-2xl shadow-2xl relative z-10 backdrop-blur-md animate-in fade-in zoom-in-95 duration-500">
@@ -41,6 +68,14 @@ export default function LoginForm() {
         </div>
 
         <form onSubmit={handleLogin} className="space-y-5">
+            {/* ALERT DE ERROR (Solo se muestra si falla) */}
+            {error && (
+                <div className="bg-rose-500/10 border border-rose-500/20 text-rose-400 p-3 rounded-xl text-sm flex items-center gap-2 animate-in slide-in-from-top-2">
+                    <AlertCircle size={16} />
+                    {error}
+                </div>
+            )}
+
             <div className="space-y-2">
                 <label className="text-sm font-medium text-slate-300">Correo Electrónico</label>
                 <div className="relative group">

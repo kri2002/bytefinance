@@ -11,33 +11,50 @@ import {
   Wallet,
 } from "lucide-react";
 
+// 1. Importar la interfaz Transaction
+interface Transaction {
+  id: string | number;
+  name: string;
+  date: string;
+  amount: number;
+  type: string;
+  status: string;
+  category?: string;
+  method?: string;
+}
 interface Category {
   id: string;
   name: string;
   color: string;
   type: "income" | "expense";
 }
-
 interface Account {
   id: string;
   name: string;
   color: string;
+  type: string;
+  balance: number;
 }
 
 interface ExpensePanelProps {
   isOpen: boolean;
   onClose: () => void;
-  // Actualizamos la firma para recibir accountId
-  onSave: (data: {
-    name: string;
-    amount: string;
-    date: string;
-    status: "paid" | "pending";
-    category?: string;
-    accountName?: string;
-  }) => void;
+  // 2. Actualizar la firma del onSave para soportar edición opcional
+  onSave: (
+    data: {
+      name: string;
+      amount: string;
+      date: string;
+      status: "paid" | "pending";
+      category?: string;
+      accountName?: string;
+    },
+    isEdit?: boolean
+  ) => void;
   categories: Category[];
-  accounts: Account[]; // 👈 Recibimos cuentas
+  accounts: Account[];
+  // 3. Nueva prop: Datos a editar
+  editData?: Transaction | null;
 }
 
 export default function ExpensePanel({
@@ -46,10 +63,15 @@ export default function ExpensePanel({
   onSave,
   categories,
   accounts,
+  editData,
 }: ExpensePanelProps) {
   const expenseCategories = useMemo(
     () => categories.filter((c) => c.type === "expense"),
     [categories]
+  );
+  const availableAccounts = useMemo(
+    () => accounts.filter((a) => a.type === "credit" || a.balance > 0),
+    [accounts]
   );
 
   const getLocalToday = () => new Date().toLocaleDateString("en-CA");
@@ -60,35 +82,72 @@ export default function ExpensePanel({
     date: getLocalToday(),
     status: "paid" as "paid" | "pending",
     categoryId: "",
-    accountId: "", // 👈 Nuevo estado
+    accountId: "",
   });
 
+  // 4. useEffect modificado para detectar MODO EDICIÓN
   useEffect(() => {
     if (isOpen) {
-      setFormData((prev) => ({
-        name: "",
-        amount: "",
-        date: getLocalToday(),
-        status: "paid",
-        categoryId:
-          prev.categoryId ||
-          (expenseCategories.length > 0 ? expenseCategories[0].id : ""),
-        accountId:
-          prev.accountId || (accounts.length > 0 ? accounts[0].id : ""), // Seleccionamos la primera cuenta por defecto
-      }));
-    }
-  }, [isOpen]);
+      if (editData) {
+        // --- MODO EDICIÓN: Pre-llenar datos ---
+        const editCat =
+          categories.find((c) => c.name === editData.category)?.id || "";
+        const editAcc =
+          accounts.find((a) => a.name === editData.method)?.id ||
+          (availableAccounts.length > 0 ? availableAccounts[0].id : "");
 
-  // Efectos de seguridad para preselección
+        setFormData({
+          name: editData.name,
+          // Usar valor absoluto para mostrar en el input
+          amount: Math.abs(editData.amount).toString(),
+          date: editData.date,
+          status: editData.status as "paid" | "pending",
+          categoryId: editCat,
+          accountId: editAcc,
+        });
+      } else {
+        // --- MODO CREACIÓN (Reset normal) ---
+        setFormData((prev) => ({
+          name: "",
+          amount: "",
+          date: getLocalToday(),
+          status: "paid",
+          categoryId:
+            prev.categoryId ||
+            (expenseCategories.length > 0 ? expenseCategories[0].id : ""),
+          accountId:
+            prev.accountId ||
+            (availableAccounts.length > 0 ? availableAccounts[0].id : ""),
+        }));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editData]); // Importante: Depender de editData
+
+  // (El otro useEffect se mantiene igual para asegurar categorías por defecto en creación)
   useEffect(() => {
-    if (isOpen && !formData.categoryId && expenseCategories.length > 0)
+    if (
+      isOpen &&
+      !editData &&
+      !formData.categoryId &&
+      expenseCategories.length > 0
+    )
       setFormData((prev) => ({ ...prev, categoryId: expenseCategories[0].id }));
-    if (isOpen && !formData.accountId && accounts.length > 0)
-      setFormData((prev) => ({ ...prev, accountId: accounts[0].id }));
+    if (isOpen && !editData && availableAccounts.length > 0) {
+      const currentValid = availableAccounts.find(
+        (a) => a.id === formData.accountId
+      );
+      if (!currentValid)
+        setFormData((prev) => ({
+          ...prev,
+          accountId: availableAccounts[0].id,
+        }));
+    }
   }, [
     isOpen,
+    editData,
     expenseCategories,
-    accounts,
+    availableAccounts,
     formData.categoryId,
     formData.accountId,
   ]);
@@ -98,11 +157,15 @@ export default function ExpensePanel({
     const selectedCat = categories.find((c) => c.id === formData.categoryId);
     const selectedAcc = accounts.find((a) => a.id === formData.accountId);
 
-    onSave({
-      ...formData,
-      category: selectedCat ? selectedCat.name : undefined,
-      accountName: selectedAcc ? selectedAcc.name : undefined, // Enviamos el nombre de la cuenta
-    });
+    // 5. Pasar bandera de si es edición
+    onSave(
+      {
+        ...formData,
+        category: selectedCat ? selectedCat.name : undefined,
+        accountName: selectedAcc ? selectedAcc.name : undefined,
+      },
+      !!editData
+    ); // true si hay editData
   };
 
   return (
@@ -127,7 +190,8 @@ export default function ExpensePanel({
               <div className="bg-rose-500/20 p-2 rounded-lg">
                 <DollarSign className="text-rose-500" size={20} />
               </div>
-              Registrar Gasto
+              {/* 6. Título dinámico */}
+              {editData ? "Editar Gasto" : "Registrar Gasto"}
             </h2>
             <button
               onClick={onClose}
@@ -141,6 +205,9 @@ export default function ExpensePanel({
             onSubmit={handleSubmit}
             className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar"
           >
+            {/* ... (El resto del formulario es IDÉNTICO) ... */}
+            {/* Solo asegúrate de que los inputs usen el estado formData correctamente */}
+
             {/* Monto */}
             <div className="space-y-2">
               <label className="text-sm font-medium text-rose-400">
@@ -154,6 +221,7 @@ export default function ExpensePanel({
                   required
                   type="number"
                   placeholder="0.00"
+                  step="0.01"
                   className="w-full bg-slate-900 border border-slate-700 rounded-2xl pl-10 pr-4 py-4 text-3xl font-bold text-white placeholder:text-slate-600 focus:border-rose-500 outline-none transition-all"
                   value={formData.amount}
                   onChange={(e) =>
@@ -180,13 +248,13 @@ export default function ExpensePanel({
               />
             </div>
 
-            {/* Selector de CUENTA (Nuevo) */}
+            {/* Selector de CUENTA */}
             <div className="space-y-3">
               <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
                 <Wallet size={16} /> Pagar con
               </label>
               <div className="grid grid-cols-2 gap-3">
-                {accounts.map((acc) => (
+                {availableAccounts.map((acc) => (
                   <button
                     key={acc.id}
                     type="button"
@@ -214,6 +282,11 @@ export default function ExpensePanel({
                   </button>
                 ))}
               </div>
+              {availableAccounts.length === 0 && (
+                <p className="text-xs text-rose-500">
+                  No tienes cuentas con saldo.
+                </p>
+              )}
             </div>
 
             {/* Selector de Categoría */}
@@ -257,6 +330,7 @@ export default function ExpensePanel({
             </div>
 
             <div className="grid grid-cols-2 gap-4">
+              {/* Fecha */}
               <div className="space-y-2">
                 <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
                   <Calendar size={16} /> Fecha
@@ -264,7 +338,6 @@ export default function ExpensePanel({
                 <input
                   required
                   type="date"
-                  max={getLocalToday()}
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none [color-scheme:dark]"
                   value={formData.date}
                   onChange={(e) =>
@@ -272,6 +345,7 @@ export default function ExpensePanel({
                   }
                 />
               </div>
+              {/* Estatus */}
               <div className="space-y-2">
                 <label className="text-sm font-medium text-slate-300">
                   Estatus
@@ -311,7 +385,9 @@ export default function ExpensePanel({
               onClick={handleSubmit}
               className="w-full bg-rose-600 hover:bg-rose-500 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-2 transition-all hover:scale-[1.02] shadow-lg shadow-rose-900/20"
             >
-              <Save size={20} /> Registrar Gasto
+              {/* 7. Texto dinámico del botón */}
+              <Save size={20} />{" "}
+              {editData ? "Guardar Cambios" : "Registrar Gasto"}
             </button>
           </div>
         </div>
