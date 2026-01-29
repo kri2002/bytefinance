@@ -1,12 +1,13 @@
 "use server";
 
-import { db } from "@/lib/dynamodb";
 import {
   PutCommand,
   QueryCommand,
   DeleteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
+import { db } from "@/lib/dynamodb";
+import { redirect } from 'next/navigation';
 import { revalidatePath } from "next/cache";
 import { getAuthenticatedUser } from "@/utils/amplify-server-utils";
 
@@ -21,10 +22,10 @@ import {
 
 const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "ByteFinanceApp";
 
-async function getUserPK(): Promise<string> {
+export async function getUserPK() {
   const user = await getAuthenticatedUser();
   if (!user || !user.id) {
-    throw new Error("Unauthorized: Usuario no autenticado.");
+    redirect('/login');
   }
   return `USER#${user.id}`;
 }

@@ -208,7 +208,8 @@ export default function Dashboard({
     });
 
     return projections;
-  }, [recurringConfig, debts, transactions]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recurringConfig, debts]);
 
   // Efecto único para mezclar transacciones reales + proyecciones
   useEffect(() => {

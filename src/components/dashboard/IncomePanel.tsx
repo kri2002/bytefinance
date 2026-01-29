@@ -172,7 +172,7 @@ export default function IncomePanel({
       />
 
       <div
-        className={`fixed top-0 right-0 h-full w-full md:w-[450px] bg-slate-950 border-l border-slate-800 shadow-2xl z-100 transform transition-transform duration-300 ease-in-out ${
+        className={`fixed top-0 right-0 h-full w-full md:w-112.5 bg-slate-950 border-l border-slate-800 shadow-2xl z-100 transform transition-transform duration-300 ease-in-out ${
           isOpen ? "translate-x-0" : "translate-x-full"
         }`}
       >
@@ -257,7 +257,7 @@ export default function IncomePanel({
                     }`}
                   >
                     <div
-                      className={`w-3 h-3 rounded-full bg-gradient-to-br ${acc.color}`}
+                      className={`w-3 h-3 rounded-full bg-linear-to-br ${acc.color}`}
                     ></div>
                     <span
                       className={`text-sm font-medium truncate ${
@@ -321,7 +321,7 @@ export default function IncomePanel({
               <input
                 required
                 type="date"
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none [color-scheme:dark]"
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none scheme-dark"
                 value={formData.date}
                 onChange={(e) =>
                   setFormData({ ...formData, date: e.target.value })

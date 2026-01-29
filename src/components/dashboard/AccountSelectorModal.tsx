@@ -53,11 +53,11 @@ export default function AccountSelectorModal({ isOpen, onClose, onSelect, accoun
                     className="group relative flex items-center justify-between p-4 rounded-xl border border-slate-800 bg-slate-900/50 hover:bg-slate-900 hover:border-blue-500/50 transition-all active:scale-[0.98]"
                 >
                     {/* Fondo Gradiente sutil al hover */}
-                    <div className={`absolute inset-0 rounded-xl bg-gradient-to-r ${acc.color} opacity-0 group-hover:opacity-10 transition-opacity`} />
+                    <div className={`absolute inset-0 rounded-xl bg-linear-to-r ${acc.color} opacity-0 group-hover:opacity-10 transition-opacity`} />
                     
                     <div className="flex items-center gap-4 relative z-10">
                         {/* Círculo de color */}
-                        <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${acc.color} flex items-center justify-center shadow-lg`}>
+                        <div className={`w-10 h-10 rounded-full bg-linear-to-br ${acc.color} flex items-center justify-center shadow-lg`}>
                             {acc.type === 'debit' ? <Landmark size={18} className="text-white"/> : <CreditCard size={18} className="text-white"/>}
                         </div>
                         
